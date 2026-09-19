@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: agente.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/agente.py",
+      "python": "${command:python.interpreterPath}",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}
