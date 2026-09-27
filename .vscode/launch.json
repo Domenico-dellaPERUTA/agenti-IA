@@ -2,7 +2,17 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python: agente.py",
+      "name": "Run Agente GUI",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/sandbox/agente_gui.py",
+      "python": "${command:python.interpreterPath}",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Run Agente CLI",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/agente.py",

@@ -88,9 +88,14 @@ class Agent:
             return str(value)
         return json.dumps(value, ensure_ascii=False)
 
-    def run(self):
+    def run(
+        self,
+        on_response: Callable[[LLMResponse], None] | None = None,
+    ) -> str | None:
         while True:
             response = self.provider.complete(self.messages, list(self.tools.values()))
+            if on_response is not None:
+                on_response(response)
 
             if response.content is not None and response.content != "":
                 self.messages.append({"role": "assistant", "content": response.content})
