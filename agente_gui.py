@@ -4,8 +4,18 @@ from pathlib import Path
 import queue
 import sys
 import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, scrolledtext, ttk
+except ModuleNotFoundError as error:
+    if error.name != "_tkinter":
+        raise
+    raise SystemExit(
+        "La GUI richiede un interprete Python compilato con Tkinter. "
+        "In VS Code esegui 'Python: Select Interpreter' e seleziona "
+        "un interprete che supera il test `python -c \"import tkinter\"`."
+    ) from error
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
