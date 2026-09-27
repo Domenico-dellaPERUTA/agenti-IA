@@ -5,7 +5,7 @@
       "name": "Run Agente GUI",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/sandbox/agente_gui.py",
+      "program": "${workspaceFolder}/agente_gui.py",
       "python": "${command:python.interpreterPath}",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",

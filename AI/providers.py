@@ -53,7 +53,7 @@ class OllamaProvider(LLMProvider):
         )
 
     def _tool_to_schema(self, fn: Callable) -> dict[str, Any]:
-        signature = inspect.signature(fn)
+        signature = inspect.signature(fn, eval_str=True)
         properties: dict[str, Any] = {}
         required: list[str] = []
 
@@ -179,7 +179,7 @@ class OpenAIProvider(LLMProvider):
         )
 
     def _tool_to_schema(self, fn: Callable) -> dict[str, Any]:
-        signature = inspect.signature(fn)
+        signature = inspect.signature(fn, eval_str=True)
         properties: dict[str, Any] = {}
         required: list[str] = []
 

@@ -1,10 +1,10 @@
 import os
 from pathlib import Path
 
-from AI import Agent, OllamaProvider, LMStudioProvider
+from AI import Agent, LMStudioProvider
 
 
-PROMPT_INIZIALE = "Leggi il file note.txt e mostrami solo il cosa contiene."
+PROMPT_INIZIALE = "Elenca i file disponibili nella sandbox e dimmi cosa contiene note.txt."
 
 
 def crea_agente(cartella_sandbox: str | os.PathLike[str] | None = None) -> Agent:
@@ -18,28 +18,17 @@ def crea_agente(cartella_sandbox: str | os.PathLike[str] | None = None) -> Agent
     if not sandbox.is_dir():
         raise ValueError(f"La cartella sandbox non esiste: {sandbox}")
 
-    def leggi_file(nome_file: str) -> str:
-        """Legge un file solo se è dentro la cartella sandbox."""
-        percorso_file = (sandbox / nome_file).resolve()
-
-        if not percorso_file.is_relative_to(sandbox):
-            return "Errore: accesso non autorizzato. Il file richiesto è fuori dalla cartella sandbox."
-
-        if not percorso_file.exists():
-            return f"Errore: il file '{nome_file}' non esiste nella cartella sandbox."
-
-        if not percorso_file.is_file():
-            return f"Errore: '{nome_file}' non è un file valido."
-
-        try:
-            return percorso_file.read_text(encoding="utf-8")
-        except OSError as error:
-            return f"Errore durante la lettura del file: {error}"
-
     provider = LMStudioProvider(model="qwen3-4b-2507")  # OllamaProvider(model="qwen3:4b")
-    agent = Agent(provider, system_prompt="Sei un assistente utile. Usa gli strumenti quando serve.")
-    agent.add_tool(leggi_file)
-    return agent
+    return Agent(
+        provider,
+        system_prompt=(
+            "Sei un assistente utile. Usa gli strumenti disponibili per lavorare "
+            "solo sui file della sandbox. Non dichiarare di aver modificato file "
+            "se lo strumento non ha confermato l'operazione. Modifica o sposta "
+            "file solo se l'utente lo ha richiesto esplicitamente."
+        ),
+        sandbox=sandbox,
+    )
 
 
 def main() -> None:
