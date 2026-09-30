@@ -70,6 +70,8 @@ class AgenteGUI:
             ("Estrarre informazioni", "Trova le righe che contengono un testo."),
             ("Confrontare file", "Mostra le differenze tra due file di testo."),
             ("Preparare attività", "Ricava attività da checklist o appunti."),
+            ("Cercare sul web", "Ricerca pubblica; la query viene inviata a DuckDuckGo."),
+            ("Leggere una pagina", "Solo testo HTTPS pubblico; niente login o moduli."),
         )
         for row, (nome, descrizione) in enumerate(azioni):
             ttk.Label(azioni_frame, text=nome, width=26).grid(
@@ -78,6 +80,16 @@ class AgenteGUI:
             ttk.Label(azioni_frame, text=descrizione).grid(
                 row=row, column=1, sticky=tk.W
             )
+        ttk.Label(
+            azioni_frame,
+            text=(
+                "La query di ricerca viene trasmessa a DuckDuckGo: non includere "
+                "dati privati o contenuti della sandbox. Nessun file viene caricato; "
+                "sono consentite solo pagine HTML pubbliche in lettura. Le fonti "
+                "web sono aggiunte automaticamente alla risposta."
+            ),
+            wraplength=790,
+        ).grid(row=len(azioni), column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
 
         ttk.Label(frame, text="Richiesta per l'agente").grid(
             row=3, column=0, columnspan=2, sticky=tk.W

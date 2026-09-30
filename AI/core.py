@@ -89,6 +89,7 @@ class Agent:
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
         self.tools: dict[str, Callable] = {}
+        self.source_providers: list[Callable[[], list[tuple[str, str]]]] = []
         self.sandbox = Path(sandbox).expanduser().resolve() if sandbox is not None else None
 
         if self.sandbox is not None and not self.sandbox.is_dir():
@@ -133,6 +134,26 @@ class Agent:
 
     def add_tool(self, fn: Callable, *, name: str | None = None):
         self.tools[name or fn.__name__] = fn
+
+    def add_source_provider(
+        self, provider: Callable[[], list[tuple[str, str]]]
+    ) -> None:
+        if not callable(provider):
+            raise TypeError("Il provider delle fonti deve essere una funzione.")
+        self.source_providers.append(provider)
+
+    def _append_sources(self, content: str | None) -> str | None:
+        sources: dict[str, str] = {}
+        for provider in self.source_providers:
+            for title, url in provider():
+                sources.setdefault(url, title)
+        if not sources:
+            return content
+
+        citations = "\n\nFonti web:\n" + "\n".join(
+            f"- {title}: {url}" for url, title in sources.items()
+        )
+        return f"{content or ''}{citations}"
 
     def _sandbox_path(self, file_path: str) -> Path:
         if self.sandbox is None:
@@ -315,7 +336,19 @@ class Agent:
                 self.messages.append({"role": "assistant", "content": response.content})
 
             if not response.tool_calls:
-                return response.content
+                final_content = self._append_sources(response.content)
+                if final_content != response.content and final_content is not None:
+                    if (
+                        self.messages
+                        and self.messages[-1].get("role") == "assistant"
+                        and self.messages[-1].get("content") == response.content
+                    ):
+                        self.messages[-1]["content"] = final_content
+                    else:
+                        self.messages.append(
+                            {"role": "assistant", "content": final_content}
+                        )
+                return final_content
 
             for call in response.tool_calls:
                 tool_fn = self.tools.get(call.name)
