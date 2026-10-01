@@ -1,0 +1,316 @@
+# Agenti IA
+
+Agenti IA è un piccolo agente conversazionale in Python: invia richieste a un
+modello linguistico, esegue gli strumenti che il modello seleziona e può
+lavorare sui file di una cartella scelta come **sandbox**. Include
+un'interfaccia grafica (GUI), un avvio da terminale (CLI) e strumenti opzionali
+di ricerca e lettura di pagine web pubbliche.
+
+Per impostazione predefinita l'applicazione usa un modello servito localmente
+da **LM Studio**. Il progetto contiene anche provider compatibili con **Ollama**
+e con le API **OpenAI**.
+
+## Funzionalità e limiti
+
+- Elenca file, cerca e legge testo, estrae informazioni, confronta documenti e
+  individua attività nella sandbox.
+- Può creare file, aggiungere testo e spostare o rinominare file **solo
+  all'interno della sandbox**. La creazione non sovrascrive file esistenti.
+- Può cercare sul web con DuckDuckGo e leggere il testo visibile di pagine
+  pubbliche. Le richieste web sono solo HTTPS GET: niente login, moduli,
+  caricamenti o download.
+- Le ricerche web inviano la query a DuckDuckGo. Non inserirvi informazioni
+  private, credenziali o contenuti della sandbox. I risultati web sono
+  contenuti non attendibili; l'agente li tratta come fonti e aggiunge le
+  citazioni alla risposta.
+- Il progetto non include un modello linguistico: occorre installare e avviare
+  un provider compatibile (vedi [Configurazione del modello](#configurazione-del-modello)).
+
+## Requisiti
+
+- Python **3.10 o successivo**.
+- `pip` e `venv` (normalmente distribuiti con Python).
+- La libreria Python `openai` (`>=1.0,<3`), installata da
+  `requirements.txt`. È usata dal provider predefinito LM Studio e da quello
+  OpenAI; non richiede una chiave OpenAI quando si usa LM Studio.
+- Una connessione Internet per installare la libreria e per gli strumenti web.
+- **Tkinter**, incluso nella maggior parte delle distribuzioni Python ma
+  talvolta da installare separatamente, se si vuole avviare la GUI.
+- LM Studio (modalità predefinita), Ollama oppure accesso a un endpoint OpenAI,
+  secondo il provider scelto.
+
+Tkinter fa parte della libreria standard Python: non si installa con `pip`.
+Per verificare se è disponibile:
+
+```bash
+python -c "import tkinter; print('Tkinter disponibile')"
+```
+
+Su Debian/Ubuntu, se manca, installare il pacchetto di sistema corrispondente,
+ad esempio `sudo apt install python3-tk`. Su macOS usare una distribuzione di
+Python che includa Tcl/Tk (per esempio quella ufficiale di python.org) oppure
+installare il componente Tkinter corrispondente alla versione Python usata.
+Su Windows selezionare Tcl/Tk nel programma di installazione di Python, se non
+è già presente.
+
+## Installazione
+
+Clonare il repository o scaricarne una copia e aprire un terminale nella
+cartella del progetto.
+
+### macOS e Linux
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+### Windows (PowerShell)
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Se PowerShell impedisce l'attivazione dello script, si può usare il prompt dei
+comandi:
+
+```bat
+.venv\Scripts\activate.bat
+```
+
+Non è necessario attivare l'ambiente virtuale se si invoca direttamente il suo
+interprete. Per esempio, su macOS/Linux:
+`.venv/bin/python -m pip install -r requirements.txt`; su Windows:
+`.venv\Scripts\python.exe -m pip install -r requirements.txt`.
+
+## Configurazione del modello
+
+### LM Studio (predefinito)
+
+1. Installare LM Studio e scaricare un modello compatibile con le tool call.
+   Il codice usa per impostazione predefinita il nome `qwen3-4b-2507`.
+2. Caricare il modello e avviare il server API locale di LM Studio, normalmente
+   all'indirizzo `http://localhost:1234/v1`.
+3. Se il nome del modello caricato o l'indirizzo del server sono diversi,
+   aggiornare la configurazione in `agente.py`, nella funzione `crea_agente`:
+
+   ```python
+   provider = LMStudioProvider(
+       model="nome-modello-esposto-dal-server",
+       # base_url="http://localhost:1234/v1",
+   )
+   ```
+
+   `base_url` è facoltativo se si usa l'indirizzo predefinito. Il client locale
+   non richiede una chiave API. Verificare che server e modello siano avviati
+   prima di inviare una richiesta.
+
+### Ollama (alternativa locale)
+
+Installare e avviare Ollama, scaricare un modello, ad esempio con
+`ollama pull qwen3:4b`, quindi installare il client opzionale:
+
+```bash
+python -m pip install ollama
+```
+
+In `agente.py`, importare `OllamaProvider` da `AI` e sostituire la riga che crea
+`LMStudioProvider` con:
+
+```python
+provider = OllamaProvider(model="qwen3:4b")
+```
+
+`ollama` non è elencato in `requirements.txt` perché serve solo scegliendo
+questo provider.
+
+### API OpenAI (alternativa remota)
+
+Impostare `OPENAI_API_KEY` nell'ambiente senza scriverla nel codice o
+versionarla. Poi in `agente.py`, importare `OpenAIProvider` da `AI` e usare:
+
+```python
+provider = OpenAIProvider(model="gpt-4o-mini")
+```
+
+Le richieste al modello in questa modalità vengono inviate al servizio remoto
+OpenAI. Non è necessario modificare o configurare questa opzione quando si usa
+LM Studio.
+
+## Avvio
+
+Dalla cartella principale, con l'ambiente virtuale attivo:
+
+```bash
+python agente_gui.py
+```
+
+La finestra permette di scegliere la cartella sandbox, scrivere una richiesta
+e inviarla con il pulsante o con **Ctrl+Invio**. La sandbox predefinita è
+`sandbox/` nella cartella del progetto.
+
+Per l'avvio da terminale:
+
+```bash
+python agente.py
+```
+
+La CLI esegue la richiesta iniziale definita in `PROMPT_INIZIALE` in
+`agente.py`. Per cambiare il prompt o il modello predefinito, modificare quel
+file. Se Tkinter non è disponibile, l'avvio CLI non ne ha bisogno.
+
+## Cartella sandbox e dati
+
+La sandbox delimita i file accessibili agli strumenti dell'agente. La GUI
+consente di selezionare un'altra cartella; la CLI usa `sandbox/` per
+impostazione predefinita. I controlli sui percorsi impediscono di leggere o
+modificare file al di fuori della cartella selezionata.
+
+`sandbox/note.txt` è un piccolo file di esempio. I contenuti della sandbox
+sono dati dell'utente, non dipendenze del programma. `.gitignore` esclude i
+file della sandbox dal versionamento, così come gli ambienti virtuali non
+vengono versionati; conservare separatamente i dati importanti.
+In alcune copie locali può essere presente anche
+`sandbox/lista_proposte_di_lavoro.txt`: è un dato ignorato da Git e non è
+garantito che sia disponibile dopo una nuova clonazione.
+
+## Test
+
+Con l'ambiente virtuale attivo, eseguire dalla radice del repository:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+I test non richiedono un modello in esecuzione né chiamate reali al web: le
+risposte di rete e del modello sono simulate nei test.
+
+## Struttura dei file
+
+```text
+.
+├── agente.py
+├── agente_gui.py
+├── requirements.txt
+├── AI/
+│   ├── __init__.py
+│   ├── core.py
+│   ├── providers.py
+│   └── web.py
+├── sandbox/
+│   └── note.txt
+├── tests/
+│   ├── test_agent_tools.py
+│   └── test_web_access.py
+└── .vscode/
+    ├── launch.json
+    └── settings.json
+```
+
+### File del progetto
+
+- [`agente.py`](./agente.py): punto d'ingresso CLI; contiene
+  `PROMPT_INIZIALE`, `crea_agente(...)` per configurare modello, sandbox e
+  strumenti web, e `main()`.
+- [`agente_gui.py`](./agente_gui.py): punto d'ingresso GUI Tkinter; contiene la
+  classe `AgenteGUI`, che costruisce la finestra, avvia l'agente in un thread
+  e mostra risposte, azioni ed errori.
+- [`requirements.txt`](./requirements.txt): dipendenze Python richieste dal
+  provider configurato (`openai`).
+- [`AI/__init__.py`](./AI/__init__.py): espone le classi pubbliche del package
+  (`Agent`, `InternetAccess`, `LLMProvider`, `LLMResponse`, `ToolCall` e i
+  provider).
+- [`AI/core.py`](./AI/core.py): logica di conversazione e strumenti sandbox.
+- [`AI/providers.py`](./AI/providers.py): adattatori per i diversi servizi
+  linguistici.
+- [`AI/web.py`](./AI/web.py): ricerca e lettura web in sola lettura.
+- [`sandbox/note.txt`](./sandbox/note.txt): esempio di testo utilizzabile
+  dall'agente. Altri file in `sandbox/` sono dati locali e possono variare da
+  installazione a installazione.
+- [`tests/test_agent_tools.py`](./tests/test_agent_tools.py): test degli
+  strumenti sandbox, dei limiti dei percorsi e degli schemi tool.
+- [`tests/test_web_access.py`](./tests/test_web_access.py): test dei parser
+  web, della validazione delle query/URL, dei limiti di rete e
+  dell'integrazione con l'agente.
+- [`.gitignore`](./.gitignore): esclude bytecode Python e file della sandbox
+  dal versionamento.
+- [`.vscode/launch.json`](./.vscode/launch.json): configurazioni di debug
+  VS Code per GUI e CLI. In VS Code selezionare come interprete quello
+  dell'ambiente `.venv`.
+- [`.vscode/settings.json`](./.vscode/settings.json): indica `python3` come
+  interprete predefinito suggerito per VS Code.
+- `Puoi`: file vuoto presente nel repository; non contiene codice e non è
+  usato dall'applicazione.
+- `__pycache__/`, `AI/__pycache__/` e `tests/__pycache__/`: cartelle di
+  bytecode Python generate dagli avvii e dai test. Non sono sorgenti né
+  dipendenze; Python le rigenera quando necessario.
+
+### Classi e componenti Python
+
+#### `AI/core.py`
+
+- `ToolCall`: nome e argomenti di una funzione richiesta dal modello.
+- `LLMResponse`: testo restituito dal modello e, se presenti, chiamate agli
+  strumenti.
+- `LLMProvider`: interfaccia base; i provider implementano `complete(...)`.
+- `Agent`: gestisce cronologia, strumenti, sandbox e ciclo delle tool call.
+  `send(...)` aggiunge un messaggio e `run(...)` interroga il provider ed
+  esegue gli strumenti disponibili. Con una sandbox registra:
+  `list_files`, `search_text`, `read_file_excerpt`, `create_file`,
+  `append_to_file`, `move_file`, `extract_information`, `compare_files` e
+  `prepare_tasks`. Le azioni possono essere sostituite con callback tramite
+  il parametro `actions`.
+
+#### `AI/providers.py`
+
+- `OllamaProvider`: comunica con Ollama tramite il suo client Python e
+  converte gli strumenti negli schemi attesi dal servizio.
+- `OpenAIProvider`: usa l'API Chat Completions compatibile con OpenAI;
+  permette di fornire un client oppure `base_url` e `api_key`.
+- `LMStudioProvider`: specializzazione di `OpenAIProvider` preconfigurata
+  sull'endpoint locale di LM Studio.
+
+#### `AI/web.py`
+
+- `WebSource`: rappresenta titolo, URL e snippet di un risultato.
+- `_SearchResultsParser`: parser HTML interno per i risultati DuckDuckGo.
+- `_VisibleTextParser`: parser interno che estrae il testo visibile ed esclude
+  script e contenuti non visibili.
+- `_PinnedHTTPSConnection`: connessione HTTPS interna che usa l'indirizzo
+  pubblico già validato.
+- `InternetAccess`: espone `web_search(...)`, `read_webpage(...)` e
+  `sources()`. Limita query, dimensione delle pagine, reindirizzamenti e
+  richieste; rifiuta indirizzi non pubblici, protocolli diversi da HTTPS e
+  contenuti non HTML.
+- `_contains_sensitive_data(...)`, `_sanitize_text(...)` e
+  `_unwrap_search_url(...)`: funzioni interne per rilevare dati sensibili,
+  sanificare testo e validare/estrarre URL dai risultati.
+
+#### `agente_gui.py` e test
+
+- `AgenteGUI`: interfaccia grafica; metodi interni costruiscono i controlli,
+  validano l'input, avviano l'agente e aggiornano la finestra in modo sicuro.
+- `DummyProvider` e `AgentToolsTests` in `tests/test_agent_tools.py`:
+  provider simulato e test degli strumenti dell'agente.
+- `DummyProvider` e `WebAccessTests` in `tests/test_web_access.py`: provider
+  simulato e test dell'accesso web e del relativo comportamento nell'agente.
+
+## Risoluzione dei problemi
+
+- **Impossibile raggiungere il provider**: controllare che LM Studio/Ollama
+  sia avviato, che il modello sia caricato e che endpoint e nome modello
+  coincidano con quelli configurati.
+- **`No module named 'openai'`**: attivare l'ambiente virtuale corretto e
+  installare `python -m pip install -r requirements.txt`.
+- **Tkinter non disponibile**: installare/abilitare Tkinter per la stessa
+  versione di Python selezionata in VS Code o nel terminale; verificare con
+  il comando riportato nei [requisiti](#requisiti). La CLI resta utilizzabile
+  senza Tkinter.
+- **Errore di connessione web**: verificare accesso DNS/HTTPS a Internet;
+  il progetto accetta solo contenuti HTML pubblici in HTTPS e può rifiutare
+  siti che limitano le richieste automatiche.
