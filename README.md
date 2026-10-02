@@ -6,6 +6,8 @@ lavorare sui file di una cartella scelta come **sandbox**. Include
 un'interfaccia grafica (GUI), un avvio da terminale (CLI) e strumenti opzionali
 di ricerca e lettura di pagine web pubbliche.
 
+Il progetto è distribuito con licenza [MIT](./LICENSE).
+
 Per impostazione predefinita l'applicazione usa un modello servito localmente
 da **LM Studio**. Il progetto contiene anche provider compatibili con **Ollama**
 e con le API **OpenAI**.
