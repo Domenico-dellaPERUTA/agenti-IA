@@ -15,7 +15,13 @@ e con le API **OpenAI**.
 - Elenca file, cerca e legge testo, estrae informazioni, confronta documenti e
   individua attività nella sandbox.
 - Può creare file, aggiungere testo e spostare o rinominare file **solo
-  all'interno della sandbox**. La creazione non sovrascrive file esistenti.
+  all'interno della sandbox**. La creazione non sovrascrive file esistenti;
+  se un nome è già occupato, l'agente riceve l'errore e può riprovare con un
+  nome diverso.
+- Dalla GUI può eseguire script Bash richiesti dall'utente, ma solo dopo aver
+  mostrato il codice esatto e averne ricevuto l'approvazione. Lo script viene
+  scritto in un'area temporanea, eliminata al termine o se l'esecuzione è
+  annullata. L'output standard e gli errori appaiono nella console della GUI.
 - Può cercare sul web con DuckDuckGo e leggere il testo visibile di pagine
   pubbliche. Le richieste web sono solo HTTPS GET: niente login, moduli,
   caricamenti o download.
@@ -152,7 +158,11 @@ python agente_gui.py
 
 La finestra permette di scegliere la cartella sandbox, scrivere una richiesta
 e inviarla con il pulsante o con **Ctrl+Invio**. La sandbox predefinita è
-`sandbox/` nella cartella del progetto.
+`sandbox/` nella cartella del progetto. Se l'agente propone di eseguire uno
+script Bash, la GUI mostra il contenuto completo e avvisa che lo script opera
+con i privilegi dell'utente corrente; si può approvare o annullare. Lo script
+temporaneo e i file temporanei destinati al comando vengono eliminati al
+termine. Non viene richiesta né memorizzata una password amministrativa.
 
 Per l'avvio da terminale:
 
@@ -170,6 +180,19 @@ La sandbox delimita i file accessibili agli strumenti dell'agente. La GUI
 consente di selezionare un'altra cartella; la CLI usa `sandbox/` per
 impostazione predefinita. I controlli sui percorsi impediscono di leggere o
 modificare file al di fuori della cartella selezionata.
+
+La sandbox **non isola i processi Bash**: uno script approvato può accedere a
+qualsiasi file o risorsa di rete consentiti all'utente che avvia l'applicazione.
+Il codice dello script viene memorizzato temporaneamente fuori dalla sandbox;
+l'approvazione mostra il codice che sarà eseguito, ma non è un'analisi che ne
+garantisce la sicurezza. Per questo controllare attentamente il codice e gli
+obiettivi di rete prima di autorizzare. Gli script sono limitati a 64 KiB; dopo
+120 secondi viene terminato il gruppo di processi avviato dallo script e i log
+sono limitati a 1 MiB. L'area temporanea viene rimossa al termine, in caso di
+errore o di annullamento. Processi che lo script avvia in background o scollega
+possono però continuare a funzionare. Gli script non vengono eseguiti se
+l'applicazione è avviata come root. La funzione Bash è disponibile su macOS e
+Linux dalla GUI, non dall'avvio CLI.
 
 `sandbox/note.txt` è un piccolo file di esempio. I contenuti della sandbox
 sono dati dell'utente, non dipendenze del programma. `.gitignore` esclude i

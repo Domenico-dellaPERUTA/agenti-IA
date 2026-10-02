@@ -310,8 +310,41 @@ class WebAccessTests(TestCase):
         self.assertIn("web_search", agent.tools)
         self.assertIn("read_webpage", agent.tools)
         self.assertIn("create_file", agent.tools)
+        self.assertNotIn("run_bash_script", agent.tools)
         self.assertEqual(len(agent.tools), 11)
         self.assertEqual(len(agent.source_providers), 1)
+
+    def test_application_agent_exposes_script_runner_only_with_gui_approval(self):
+        approval = lambda _path, _script: False
+        provider = DummyProvider([])
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            agente_module,
+            "LMStudioProvider",
+            return_value=provider,
+        ):
+            agent = agente_module.crea_agente(
+                Path(directory),
+                script_approval=approval,
+            )
+
+        self.assertIn("run_bash_script", agent.tools)
+        description = agent.tools["run_bash_script"].__doc__
+        self.assertIn("nmap", description)
+        self.assertIn("file temporaneo", description)
+        self.assertIn("direttamente il codice", description)
+        self.assertIn("127.0.0.1", agent.messages[0]["content"])
+
+    def test_cli_prompt_does_not_claim_script_execution_is_available(self):
+        provider = DummyProvider([])
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            agente_module,
+            "LMStudioProvider",
+            return_value=provider,
+        ):
+            agent = agente_module.crea_agente(Path(directory))
+
+        self.assertNotIn("run_bash_script", agent.tools)
+        self.assertIn("non è disponibile uno strumento di esecuzione script", agent.messages[0]["content"])
 
     def test_tool_schema_exposes_no_write_or_http_mutation_tool(self):
         self.assertEqual(

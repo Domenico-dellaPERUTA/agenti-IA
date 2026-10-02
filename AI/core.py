@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import codecs
 import difflib
 from functools import wraps
 import json
-from collections.abc import Callable, Mapping
+import os
 from pathlib import Path
 import re
+import select
+import signal
+import subprocess
+import tempfile
+import time
+from collections.abc import Callable, Mapping
 from typing import Any
 
 
@@ -83,6 +90,8 @@ class Agent:
         *,
         sandbox: str | Path | None = None,
         actions: Mapping[str, Callable[..., Any]] | None = None,
+        script_approval: Callable[[str, str], bool] | None = None,
+        script_output: Callable[[str], None] | None = None,
     ):
         self.provider = provider
         self.messages: list[dict] = []
@@ -91,6 +100,8 @@ class Agent:
         self.tools: dict[str, Callable] = {}
         self.source_providers: list[Callable[[], list[tuple[str, str]]]] = []
         self.sandbox = Path(sandbox).expanduser().resolve() if sandbox is not None else None
+        self.script_approval = script_approval
+        self.script_output = script_output
 
         if self.sandbox is not None and not self.sandbox.is_dir():
             raise ValueError(f"La cartella sandbox non esiste: {self.sandbox}")
@@ -131,6 +142,8 @@ class Agent:
                         lambda _callback=callback, **kwargs: _callback(**kwargs)
                     )
                 self.add_tool(action, name=name)
+            if self.script_approval is not None:
+                self.add_tool(self.run_bash_script)
 
     def add_tool(self, fn: Callable, *, name: str | None = None):
         self.tools[name or fn.__name__] = fn
@@ -246,6 +259,126 @@ class Agent:
         source.rename(destination)
         return f"Spostato in: {destination.relative_to(self._sandbox_root()).as_posix()}"
 
+    def run_bash_script(self, script: str) -> str:
+        """Esegue codice Bash richiesto dall'utente dopo l'approvazione GUI, usando un file temporaneo.
+
+        Passa direttamente il codice da eseguire: non usare create_file per
+        preparare script. È adatto anche a comandi locali autorizzati come nmap
+        su localhost. Il file temporaneo viene rimosso al termine, anche se
+        l'utente annulla l'esecuzione o si verifica un errore.
+        """
+        if self.script_approval is None:
+            raise PermissionError("L'esecuzione degli script non è abilitata senza approvazione GUI.")
+        if not isinstance(script, str):
+            raise TypeError("Il contenuto dello script deve essere testo.")
+        script_bytes = script.encode("utf-8")
+        if len(script_bytes) > 64 * 1024:
+            raise ValueError("Lo script supera il limite consentito di 64 KiB.")
+        if "\x00" in script:
+            raise ValueError("Lo script contiene caratteri NUL non validi.")
+
+        if os.name != "posix":
+            raise RuntimeError("L'esecuzione di script Bash è supportata solo su macOS e Linux.")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            raise PermissionError("Per sicurezza, gli script non vengono eseguiti come root.")
+
+        with tempfile.TemporaryDirectory(prefix="agente-script-") as temporary_directory:
+            script_path = Path(temporary_directory) / "script.sh"
+            script_path.write_bytes(script_bytes)
+            nome_script = "script temporaneo (script.sh)"
+            if not self.script_approval(nome_script, script):
+                return f"Esecuzione annullata dall'utente: {nome_script}"
+            return self._execute_bash_script(script_path, nome_script)
+
+    def _execute_bash_script(self, script_path: Path, display_name: str) -> str:
+        environment = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "HOME": str(self._sandbox_root()),
+            "TMPDIR": str(script_path.parent),
+            "LANG": "C",
+        }
+        process = subprocess.Popen(
+            ["bash", "--noprofile", "--norc", str(script_path)],
+            cwd=self._sandbox_root(),
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        assert process.stdout is not None
+        started_at = time.monotonic()
+        timed_out = False
+        output_limit_exceeded = False
+        output_size = 0
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+        def terminate_process_group() -> None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                if process.poll() is None:
+                    process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                if process.poll() is None:
+                    process.kill()
+            process.wait()
+
+        try:
+            while True:
+                if time.monotonic() - started_at > 120:
+                    timed_out = True
+                    terminate_process_group()
+                    break
+
+                ready, _, _ = select.select([process.stdout], [], [], 0.1)
+                if not ready:
+                    continue
+                chunk = os.read(process.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+
+                output_size += len(chunk)
+                if output_size > 1024 * 1024:
+                    output_limit_exceeded = True
+                    terminate_process_group()
+                    break
+                if self.script_output is not None:
+                    decoded = decoder.decode(chunk)
+                    if decoded:
+                        self.script_output(decoded)
+        except BaseException:
+            terminate_process_group()
+            raise
+        finally:
+            process.stdout.close()
+
+        return_code = process.wait()
+        if timed_out:
+            raise TimeoutError(
+                "Script terminato dopo aver superato il limite di 120 secondi: "
+                f"{display_name}"
+            )
+        if output_limit_exceeded:
+            raise RuntimeError(
+                "Script terminato dopo aver superato il limite di output di 1 MiB: "
+                f"{display_name}"
+            )
+        remaining_output = decoder.decode(b"", final=True)
+        if remaining_output and self.script_output is not None:
+            self.script_output(remaining_output)
+        return f"Script temporaneo terminato con codice {return_code}."
+
     def _sandbox_root(self) -> Path:
         if self.sandbox is None:
             raise RuntimeError("Questa azione richiede una cartella sandbox.")
@@ -326,6 +459,7 @@ class Agent:
     def run(
         self,
         on_response: Callable[[LLMResponse], None] | None = None,
+        on_tool_result: Callable[[str, str], None] | None = None,
     ) -> str | None:
         while True:
             response = self.provider.complete(self.messages, list(self.tools.values()))
@@ -355,9 +489,20 @@ class Agent:
                 if tool_fn is None:
                     raise ValueError(f"Tool non registrata: {call.name}")
 
-                risultato = tool_fn(**call.arguments)
+                try:
+                    risultato = self._stringify_tool_result(
+                        tool_fn(**call.arguments)
+                    )
+                except FileExistsError as error:
+                    risultato = (
+                        f"Errore: {error}. Il file esiste già e non è stato "
+                        "sovrascritto. Scegli un percorso diverso e riprova."
+                    )
+
+                if on_tool_result is not None:
+                    on_tool_result(call.name, risultato)
                 self.messages.append({
                     "role": "tool",
                     "tool_name": call.name,
-                    "content": self._stringify_tool_result(risultato),
+                    "content": risultato,
                 })

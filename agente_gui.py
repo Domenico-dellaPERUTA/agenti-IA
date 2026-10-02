@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 import queue
 import sys
@@ -23,6 +24,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from AI import LLMResponse
 from agente import PROMPT_INIZIALE, crea_agente
+
+
+@dataclass
+class RichiestaApprovazioneScript:
+    file_path: str
+    script: str
+    decisione: bool = False
+    completato: threading.Event = field(default_factory=threading.Event)
 
 
 class AgenteGUI:
@@ -70,6 +79,7 @@ class AgenteGUI:
             ("Estrarre informazioni", "Trova le righe che contengono un testo."),
             ("Confrontare file", "Mostra le differenze tra due file di testo."),
             ("Preparare attività", "Ricava attività da checklist o appunti."),
+            ("Eseguire script Bash", "Approva il codice; script e temporanei vengono rimossi al termine."),
             ("Cercare sul web", "Ricerca pubblica; la query viene inviata a DuckDuckGo."),
             ("Leggere una pagina", "Solo testo HTTPS pubblico; niente login o moduli."),
         )
@@ -154,12 +164,78 @@ class AgenteGUI:
 
     def _esegui_agente(self, cartella: Path, prompt: str) -> None:
         try:
-            agent = crea_agente(cartella)
+            agent = crea_agente(
+                cartella,
+                script_approval=self._richiedi_approvazione_script,
+                script_output=lambda output: self.events.put(("output", output)),
+            )
             agent.send(prompt)
-            risultato = agent.run(on_response=self._mostra_risposta)
+            risultato = agent.run(
+                on_response=self._mostra_risposta,
+                on_tool_result=lambda name, result: self.events.put(
+                    ("output", f"Risultato {name}: {result}\n")
+                ),
+            )
             self.events.put(("risultato", risultato))
         except Exception as error:
             self.events.put(("errore", error))
+
+    def _richiedi_approvazione_script(self, file_path: str, script: str) -> bool:
+        richiesta = RichiestaApprovazioneScript(file_path, script)
+        self.events.put(("approvazione_script", richiesta))
+        richiesta.completato.wait()
+        return richiesta.decisione
+
+    def _mostra_dialog_script(self, richiesta: RichiestaApprovazioneScript) -> None:
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Autorizza esecuzione script")
+        dialog.geometry("760x560")
+        dialog.minsize(560, 400)
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+        percorso = richiesta.file_path
+        ttk.Label(
+            frame,
+            text=(
+                f"Questo script temporaneo verrà eseguito con i privilegi dell'utente "
+                f"corrente e poi eliminato: {percorso}."
+            ),
+            wraplength=720,
+        ).pack(anchor=tk.W, pady=(0, 6))
+        ttk.Label(
+            frame,
+            text=(
+                "Gli script possono modificare o leggere file accessibili all'utente "
+                "e usare la rete; processi avviati in background potrebbero continuare "
+                "dopo la fine dello script. Verifica attentamente il codice."
+            ),
+            wraplength=720,
+        ).pack(anchor=tk.W, pady=(0, 8))
+        codice = scrolledtext.ScrolledText(frame, wrap=tk.NONE, state=tk.NORMAL)
+        codice.pack(fill=tk.BOTH, expand=True)
+        codice.insert("1.0", richiesta.script)
+        codice.configure(state=tk.DISABLED)
+
+        pulsanti = ttk.Frame(frame)
+        pulsanti.pack(fill=tk.X, pady=(10, 0))
+
+        def chiudi(approvato: bool) -> None:
+            richiesta.decisione = approvato
+            dialog.grab_release()
+            dialog.destroy()
+            richiesta.completato.set()
+
+        ttk.Button(
+            pulsanti, text="Annulla", command=lambda: chiudi(False)
+        ).pack(side=tk.RIGHT)
+        ttk.Button(
+            pulsanti, text="Approva ed esegui", command=lambda: chiudi(True)
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", lambda: chiudi(False))
+        dialog.bind("<Escape>", lambda _event: chiudi(False))
 
     def _mostra_risposta(self, response: LLMResponse) -> None:
         if response.content:
@@ -176,6 +252,10 @@ class AgenteGUI:
                 tipo, contenuto = self.events.get_nowait()
                 if tipo == "output":
                     self._aggiungi_output(str(contenuto))
+                elif tipo == "approvazione_script":
+                    if not isinstance(contenuto, RichiestaApprovazioneScript):
+                        raise TypeError("Richiesta di approvazione script non valida.")
+                    self._mostra_dialog_script(contenuto)
                 elif tipo == "risultato":
                     risultato = contenuto if contenuto is not None else "(nessun risultato)"
                     self._aggiungi_output(f"Risultato finale:\n{risultato}\n\n")
