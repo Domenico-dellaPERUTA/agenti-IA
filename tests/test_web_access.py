@@ -1,3 +1,6 @@
+from contextlib import redirect_stdout
+from io import StringIO
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -345,6 +348,50 @@ class WebAccessTests(TestCase):
 
         self.assertNotIn("run_bash_script", agent.tools)
         self.assertIn("non è disponibile uno strumento di esecuzione script", agent.messages[0]["content"])
+
+    def test_cli_script_approval_requires_explicit_confirmation(self):
+        displayed = StringIO()
+        with patch("builtins.input", return_value="ESEGUI"), redirect_stdout(displayed):
+            approved = agente_module._approva_script_cli(
+                "script temporaneo (script.sh)",
+                "printf 'scan locale\\n'\n",
+            )
+
+        self.assertTrue(approved)
+        self.assertIn("printf 'scan locale\\n'", displayed.getvalue())
+
+        with patch("builtins.input", return_value="si"), redirect_stdout(StringIO()):
+            self.assertFalse(
+                agente_module._approva_script_cli("script.sh", "echo test")
+            )
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "Script execution as root is disabled")
+    def test_cli_main_enables_script_execution_and_streams_logs(self):
+        provider = DummyProvider(
+            [
+                LLMResponse(
+                    tool_calls=[
+                        ToolCall(
+                            name="run_bash_script",
+                            arguments={"script": "printf 'cli output\\n'\n"},
+                        )
+                    ]
+                ),
+                LLMResponse(content="Scansione completata."),
+            ]
+        )
+        displayed = StringIO()
+        with (
+            patch.object(agente_module, "LMStudioProvider", return_value=provider),
+            patch("builtins.input", side_effect=["Scansiona localhost", "ESEGUI"]),
+            redirect_stdout(displayed),
+        ):
+            agente_module.main()
+
+        self.assertIn("printf 'cli output\\n'", displayed.getvalue())
+        self.assertIn("cli output", displayed.getvalue())
+        self.assertIn("Risultato run_bash_script", displayed.getvalue())
+        self.assertIn("Scansione completata.", displayed.getvalue())
 
     def test_tool_schema_exposes_no_write_or_http_mutation_tool(self):
         self.assertEqual(

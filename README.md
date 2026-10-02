@@ -170,9 +170,11 @@ Per l'avvio da terminale:
 python agente.py
 ```
 
-La CLI esegue la richiesta iniziale definita in `PROMPT_INIZIALE` in
-`agente.py`. Per cambiare il prompt o il modello predefinito, modificare quel
-file. Se Tkinter non è disponibile, l'avvio CLI non ne ha bisogno.
+La CLI chiede la richiesta nel terminale. Se l'agente vuole eseguire uno
+script Bash, mostra il codice completo e attende che l'utente digiti
+`ESEGUI`; qualsiasi altro input o la fine dell'input annulla l'esecuzione.
+L'output dei comandi appare in tempo reale nel terminale. Se Tkinter non è
+disponibile, l'avvio CLI non ne ha bisogno.
 
 ## Cartella sandbox e dati
 
@@ -191,8 +193,8 @@ obiettivi di rete prima di autorizzare. Gli script sono limitati a 64 KiB; dopo
 sono limitati a 1 MiB. L'area temporanea viene rimossa al termine, in caso di
 errore o di annullamento. Processi che lo script avvia in background o scollega
 possono però continuare a funzionare. Gli script non vengono eseguiti se
-l'applicazione è avviata come root. La funzione Bash è disponibile su macOS e
-Linux dalla GUI, non dall'avvio CLI.
+l'applicazione è avviata come root. La funzione Bash è disponibile dalla GUI
+e dalla CLI interattiva su macOS e Linux.
 
 `sandbox/note.txt` è un piccolo file di esempio. I contenuti della sandbox
 sono dati dell'utente, non dipendenze del programma. `.gitignore` esclude i

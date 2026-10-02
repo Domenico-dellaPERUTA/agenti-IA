@@ -1,6 +1,7 @@
 from collections.abc import Callable
 import os
 from pathlib import Path
+import sys
 
 from AI import Agent, InternetAccess, LMStudioProvider
 
@@ -47,13 +48,13 @@ def crea_agente(
     )
     if script_approval is not None:
         prompt_sistema += (
-            " Gli script Bash possono essere eseguiti solo se l'utente li "
-            "approva esplicitamente nella finestra che ne mostra il contenuto "
-            "completo; non aggirare né anticipare tale conferma. Quando la "
+            " Gli script Bash possono essere eseguiti solo dopo che l'utente "
+            "ha approvato esplicitamente il codice mostrato dalla GUI o nel "
+            "terminale; non aggirare né anticipare tale conferma. Quando la "
             "richiesta dell'utente richiede esplicitamente uno script, invoca "
             "run_bash_script passando direttamente il codice nello strumento: "
-            "il tool crea un file temporaneo, la GUI mostra lo script e aspetta "
-            "l'approvazione, poi elimina il temporaneo al termine. Non creare "
+            "il tool crea un file temporaneo, mostra lo script per "
+            "l'approvazione e poi elimina il temporaneo al termine. Non creare "
             "prima un file .sh con create_file. Non "
             "rispondere che non puoi avviare programmi esterni o strumenti "
             "di rete se è disponibile questo tool. Per una richiesta di "
@@ -87,9 +88,48 @@ def crea_agente(
 
 
 def main() -> None:
-    agent = crea_agente()
-    agent.send(PROMPT_INIZIALE)
-    print(agent.run())
+    try:
+        prompt = input("Richiesta per l'agente: ").strip()
+    except EOFError:
+        print("Nessuna richiesta ricevuta.")
+        return
+    if not prompt:
+        print("La richiesta non può essere vuota.")
+        return
+
+    def mostra_output(output: str) -> None:
+        sys.stdout.write(output)
+        sys.stdout.flush()
+
+    agent = crea_agente(
+        script_approval=_approva_script_cli,
+        script_output=mostra_output,
+    )
+    agent.send(prompt)
+    result = agent.run(
+        on_response=lambda response: (
+            print(f"Modello:\n{response.content}\n")
+            if response.content
+            else None
+        ),
+        on_tool_result=lambda name, result: print(f"Risultato {name}: {result}"),
+    )
+    if result:
+        print(result)
+
+
+def _approva_script_cli(file_path: str, script: str) -> bool:
+    print(f"\nScript temporaneo da eseguire: {file_path}")
+    print("Verifica il codice: opererà con i privilegi del tuo utente.")
+    print("----- inizio script -----")
+    print(script, end="" if script.endswith("\n") else "\n")
+    print("----- fine script -----")
+    try:
+        conferma = input("Digita ESEGUI per autorizzare (qualsiasi altro valore annulla): ")
+    except EOFError:
+        print("Input terminato: esecuzione annullata.")
+        return False
+    return conferma.strip() == "ESEGUI"
 
 
 if __name__ == "__main__":
