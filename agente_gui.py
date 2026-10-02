@@ -1,3 +1,12 @@
+"""Interfaccia Tkinter dimostrativa per usare la libreria ``AI``.
+
+La finestra raccoglie prompt e percorso sandbox; il lavoro di rete/modello
+avviene in un thread secondario, mentre gli eventi vengono trasferiti alla
+finestra tramite una coda così Tkinter resta aggiornato dal thread principale.
+Per integrare la libreria in un'altra applicazione si può usare direttamente
+``Agent`` e un provider, senza importare questo modulo GUI.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -28,6 +37,12 @@ from agente import PROMPT_INIZIALE, crea_agente
 
 @dataclass
 class RichiestaApprovazioneScript:
+    """Scambia una richiesta di approvazione tra worker e thread Tkinter.
+
+    Il worker attende ``completato``; il thread grafico imposta ``decisione``
+    prima di segnalare l'evento.
+    """
+
     file_path: str
     script: str
     decisione: bool = False
@@ -35,11 +50,16 @@ class RichiestaApprovazioneScript:
 
 
 class AgenteGUI:
+    """App demo per conversazioni, sandbox, approvazione script e log live."""
+
     def __init__(self, window: tk.Tk):
+        """Imposta la finestra principale, stato condiviso e polling eventi."""
         self.window = window
         self.window.title("Agente AI")
         self.window.geometry("900x720")
         self.window.minsize(700, 560)
+        # I worker non manipolano direttamente Tkinter: inviano eventi tipizzati
+        # in modo informale nella coda, consumati periodicamente dal thread GUI.
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         self.cartella_sandbox = tk.StringVar(
@@ -51,6 +71,7 @@ class AgenteGUI:
         self.window.after(100, self._leggi_eventi)
 
     def _crea_interfaccia(self) -> None:
+        """Costruisce i controlli Tk e collega widget a callback dell'app."""
         frame = ttk.Frame(self.window, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
         frame.columnconfigure(0, weight=1)
@@ -130,10 +151,12 @@ class AgenteGUI:
         )
 
     def _avvia_da_tastiera(self, _event: tk.Event) -> str:
+        """Mappa Ctrl+Invio all'invio del prompt e blocca il newline nel widget."""
         self._avvia_agente()
         return "break"
 
     def _seleziona_cartella(self) -> None:
+        """Apre il selettore di cartelle e aggiorna la sandbox scelta."""
         cartella = filedialog.askdirectory(
             title="Seleziona la cartella sandbox",
             initialdir=self.cartella_sandbox.get() or str(PROJECT_ROOT),
@@ -142,6 +165,7 @@ class AgenteGUI:
             self.cartella_sandbox.set(cartella)
 
     def _avvia_agente(self) -> None:
+        """Valida input GUI e avvia il lavoro fuori dal thread grafico."""
         percorso_cartella = self.cartella_sandbox.get().strip()
         prompt = self.prompt.get("1.0", tk.END).strip()
         if not percorso_cartella or not Path(percorso_cartella).expanduser().is_dir():
@@ -163,6 +187,7 @@ class AgenteGUI:
         ).start()
 
     def _esegui_agente(self, cartella: Path, prompt: str) -> None:
+        """Crea un agente per la richiesta e invia gli eventi del worker alla GUI."""
         try:
             agent = crea_agente(
                 cartella,
@@ -181,12 +206,14 @@ class AgenteGUI:
             self.events.put(("errore", error))
 
     def _richiedi_approvazione_script(self, file_path: str, script: str) -> bool:
+        """Invia la richiesta di approvazione al thread Tk e attende la decisione."""
         richiesta = RichiestaApprovazioneScript(file_path, script)
         self.events.put(("approvazione_script", richiesta))
         richiesta.completato.wait()
         return richiesta.decisione
 
     def _mostra_dialog_script(self, richiesta: RichiestaApprovazioneScript) -> None:
+        """Mostra codice non modificabile e termina con approva o annulla."""
         dialog = tk.Toplevel(self.window)
         dialog.title("Autorizza esecuzione script")
         dialog.geometry("760x560")
@@ -223,6 +250,7 @@ class AgenteGUI:
         pulsanti.pack(fill=tk.X, pady=(10, 0))
 
         def chiudi(approvato: bool) -> None:
+            """Memorizza la scelta, chiude la finestra e sblocca il worker."""
             richiesta.decisione = approvato
             dialog.grab_release()
             dialog.destroy()
@@ -238,6 +266,7 @@ class AgenteGUI:
         dialog.bind("<Escape>", lambda _event: chiudi(False))
 
     def _mostra_risposta(self, response: LLMResponse) -> None:
+        """Trasforma risposta del modello e tool call in eventi leggibili."""
         if response.content:
             self.events.put(("output", f"Modello:\n{response.content}\n\n"))
         for call in response.tool_calls:
@@ -247,6 +276,7 @@ class AgenteGUI:
             ))
 
     def _leggi_eventi(self) -> None:
+        """Svuota la coda aggiornando widget e stato solo dal thread Tk."""
         try:
             while True:
                 tipo, contenuto = self.events.get_nowait()
@@ -270,6 +300,7 @@ class AgenteGUI:
         self.window.after(100, self._leggi_eventi)
 
     def _aggiungi_output(self, testo: str) -> None:
+        """Accoda testo al log e scorre automaticamente all'ultima riga."""
         self.output.configure(state=tk.NORMAL)
         self.output.insert(tk.END, testo)
         self.output.see(tk.END)

@@ -1,3 +1,11 @@
+"""Nucleo indipendente dal provider per conversazioni, strumenti e sandbox.
+
+Un ``Agent`` delega il completamento dei messaggi a un ``LLMProvider``,
+esegue le funzioni richieste dal modello e aggiunge i risultati alla
+conversazione. Le interfacce qui definite sono il punto di estensione della
+libreria per nuovi provider e nuovi strumenti.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -22,7 +30,12 @@ class ToolCall:
     """Rappresenta una chiamata a una funzione generata dal modello.
 
     Gli strumenti di un modello possono restituire più azioni da eseguire,
-    ciascuna identificata dal nome e dai parametri da passare.
+    ciascuna identificata dal nome e dai parametri da passare. Il provider
+    converte la rappresentazione specifica del servizio in questa forma comune.
+
+    Attributi:
+        name: Nome registrato dello strumento che l'agente deve invocare.
+        arguments: Argomenti nominati da passare alla funzione dello strumento.
 
     Esempio:
         >>> chiamata = ToolCall(
@@ -40,7 +53,13 @@ class LLMResponse:
     """Contiene la risposta di un provider LLM.
 
     Una risposta può includere sia un testo generato dal modello sia una
-    lista di tool call da eseguire in modo automatico.
+    lista di tool call da eseguire in modo automatico. Un provider può
+    restituire entrambe le parti se il modello produce testo insieme alle
+    chiamate.
+
+    Attributi:
+        content: Testo finale o intermedio prodotto dal modello, se presente.
+        tool_calls: Azioni richieste dal modello nel formato ``ToolCall``.
 
     Esempio:
         >>> risposta = LLMResponse(content="Ciao!")
@@ -55,7 +74,8 @@ class LLMProvider:
 
     Ogni provider specifico deve implementare il metodo ``complete`` per
     inviare messaggi al modello e trasformare la risposta in un
-    ``LLMResponse``.
+    ``LLMResponse``. I provider concreti mantengono così separati il protocollo
+    di rete e il ciclo di orchestrazione dell'agente.
 
     Esempio:
         >>> class MioProvider(LLMProvider):
@@ -65,6 +85,18 @@ class LLMProvider:
     """
 
     def complete(self, messages: list[dict], tools: list[Callable] | None = None) -> LLMResponse:
+        """Invia la conversazione al modello e normalizza la risposta.
+
+        Args:
+            messages: Cronologia in formato comune ``role``/``content``.
+            tools: Funzioni disponibili da descrivere al modello, se supportate.
+
+        Returns:
+            Risposta normalizzata, contenente testo, chiamate a tool o entrambi.
+
+        Raises:
+            NotImplementedError: La classe base non implementa un provider.
+        """
         raise NotImplementedError("Il provider deve implementare complete().")
 
 
@@ -75,6 +107,21 @@ class Agent:
     coordina l'esecuzione delle chiamate generate dal modello. Se viene
     specificata una sandbox, registra anche le nove azioni sui file; le singole
     azioni possono essere sostituite passando callback in ``actions``.
+    Gli strumenti per eseguire script vengono aggiunti solo se il chiamante
+    fornisce una callback esplicita di approvazione. I provider di fonti
+    raccolgono riferimenti da aggiungere alla risposta conclusiva.
+
+    Args:
+        provider: Implementazione del protocollo LLM da usare.
+        system_prompt: Istruzioni iniziali opzionali inviate al modello.
+        sandbox: Radice dei file accessibili agli strumenti di file.
+        actions: Sostituzioni delle azioni standard, indicizzate per nome.
+        script_approval: Callback che mostra il codice e restituisce il consenso.
+        script_output: Callback che riceve in tempo reale l'output dello script.
+
+    Nota:
+        La sandbox limita gli strumenti Python di file, ma non confina processi
+        Bash: uno script approvato opera con i permessi dell'utente del processo.
 
     Esempio:
         >>> provider = MioProvider()
@@ -93,12 +140,15 @@ class Agent:
         script_approval: Callable[[str, str], bool] | None = None,
         script_output: Callable[[str], None] | None = None,
     ):
+        """Inizializza stato, strumenti e limiti della sandbox dell'agente."""
         self.provider = provider
         self.messages: list[dict] = []
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
         self.tools: dict[str, Callable] = {}
         self.source_providers: list[Callable[[], list[tuple[str, str]]]] = []
+        # Risolve "~" e percorsi relativi subito, così tutti i tool usano una
+        # radice assoluta stabile per la durata dell'agente.
         self.sandbox = Path(sandbox).expanduser().resolve() if sandbox is not None else None
         self.script_approval = script_approval
         self.script_output = script_output
@@ -138,6 +188,9 @@ class Agent:
                 action = (actions or {}).get(name, default_action)
                 if action is not default_action:
                     callback = action
+                    # Mantiene la firma/docstring del tool standard affinché
+                    # il provider possa generare lo schema, delegando l'azione
+                    # effettiva alla callback personalizzata.
                     action = wraps(default_action)(
                         lambda _callback=callback, **kwargs: _callback(**kwargs)
                     )
@@ -146,16 +199,27 @@ class Agent:
                 self.add_tool(self.run_bash_script)
 
     def add_tool(self, fn: Callable, *, name: str | None = None):
+        """Registra una funzione invocabile dal modello con il nome indicato.
+
+        Se ``name`` è omesso si usa ``fn.__name__``. Registrare un nome già
+        esistente sostituisce lo strumento precedente con quello nuovo.
+        """
         self.tools[name or fn.__name__] = fn
 
     def add_source_provider(
         self, provider: Callable[[], list[tuple[str, str]]]
     ) -> None:
+        """Registra una funzione che restituisce coppie ``(titolo, URL)``.
+
+        Gli URL restituiti vengono deduplicati e allegati alla risposta finale
+        quando almeno un provider produce fonti.
+        """
         if not callable(provider):
             raise TypeError("Il provider delle fonti deve essere una funzione.")
         self.source_providers.append(provider)
 
     def _append_sources(self, content: str | None) -> str | None:
+        """Aggiunge alla risposta le fonti aggregate senza ripetere gli URL."""
         sources: dict[str, str] = {}
         for provider in self.source_providers:
             for title, url in provider():
@@ -169,6 +233,11 @@ class Agent:
         return f"{content or ''}{citations}"
 
     def _sandbox_path(self, file_path: str) -> Path:
+        """Risolvi un percorso relativo e rifiuta fughe fuori dalla sandbox.
+
+        ``Path.resolve`` normalizza anche i componenti ``..`` e i collegamenti
+        simbolici; il controllo successivo verifica la destinazione effettiva.
+        """
         if self.sandbox is None:
             raise RuntimeError("Questa azione richiede una cartella sandbox.")
         path = (self.sandbox / file_path).resolve()
@@ -177,7 +246,11 @@ class Agent:
         return path
 
     def list_files(self, directory: str = "") -> list[str]:
-        """Elenca i file di una cartella della sandbox e delle sue sottocartelle."""
+        """Elenca percorsi relativi dei file interni alla cartella richiesta.
+
+        I collegamenti simbolici che puntano fuori dalla sandbox vengono
+        esclusi. Solleva ``NotADirectoryError`` se la cartella non esiste.
+        """
         folder = self._sandbox_path(directory)
         if not folder.is_dir():
             raise NotADirectoryError(f"La cartella '{directory}' non esiste nella sandbox.")
@@ -190,7 +263,17 @@ class Agent:
         )
 
     def search_text(self, query: str, file_extension: str = "") -> list[str]:
-        """Cerca una frase nei file di testo della sandbox, opzionalmente filtrati per estensione."""
+        """Cerca una frase senza distinzione tra maiuscole e minuscole.
+
+        Args:
+            query: Testo non vuoto da individuare nelle righe.
+            file_extension: Estensione facoltativa, con o senza punto iniziale.
+
+        Returns:
+            Righe corrispondenti nel formato ``percorso:numero: contenuto``.
+
+        I file non UTF-8 causano un errore esplicito anziché essere ignorati.
+        """
         if not query:
             raise ValueError("La ricerca non può essere vuota.")
         if file_extension and not file_extension.startswith("."):
@@ -217,7 +300,11 @@ class Agent:
     def read_file_excerpt(
         self, file_path: str, start_line: int = 1, end_line: int = 50
     ) -> str:
-        """Legge un intervallo di righe di un file della sandbox, numerate da 1."""
+        """Legge un intervallo inclusivo di righe, con numerazione da 1.
+
+        L'intervallo deve iniziare da una riga positiva e il termine non può
+        precedere l'inizio; il percorso deve designare un file nella sandbox.
+        """
         if start_line < 1 or end_line < start_line:
             raise ValueError("Intervallo di righe non valido.")
         path = self._sandbox_path(file_path)
@@ -230,7 +317,11 @@ class Agent:
         )
 
     def create_file(self, file_path: str, content: str) -> str:
-        """Crea un nuovo file nella sandbox senza sovrascrivere file esistenti."""
+        """Crea un nuovo file UTF-8 senza sovrascriverne uno esistente.
+
+        Crea anche le cartelle intermedie. L'apertura in modalità esclusiva
+        rende atomica la protezione contro la sovrascrittura concorrente.
+        """
         path = self._sandbox_path(file_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8") as file:
@@ -238,7 +329,11 @@ class Agent:
         return f"Creato: {path.relative_to(self._sandbox_root()).as_posix()}"
 
     def append_to_file(self, file_path: str, content: str) -> str:
-        """Aggiunge testo alla fine di un file della sandbox, creandolo se manca."""
+        """Aggiunge testo UTF-8 alla fine di un file, creandolo se necessario.
+
+        Le cartelle intermedie sono create automaticamente; il percorso resta
+        vincolato alla sandbox come per gli altri strumenti di file.
+        """
         path = self._sandbox_path(file_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as file:
@@ -246,7 +341,11 @@ class Agent:
         return f"Aggiornato: {path.relative_to(self._sandbox_root()).as_posix()}"
 
     def move_file(self, source_path: str, destination_path: str) -> str:
-        """Sposta o rinomina un file della sandbox senza sovrascrivere la destinazione."""
+        """Sposta o rinomina un file senza sovrascrivere la destinazione.
+
+        Rifiuta file sorgente assenti, destinazioni già occupate e operazioni
+        che indicano lo stesso percorso per origine e destinazione.
+        """
         source = self._sandbox_path(source_path)
         destination = self._sandbox_path(destination_path)
         if not source.is_file():
@@ -260,12 +359,30 @@ class Agent:
         return f"Spostato in: {destination.relative_to(self._sandbox_root()).as_posix()}"
 
     def run_bash_script(self, script: str) -> str:
-        """Esegue codice Bash richiesto dall'utente dopo l'approvazione GUI, usando un file temporaneo.
+        """Esegue codice Bash dopo approvazione, usando una cartella temporanea.
 
-        Passa direttamente il codice da eseguire: non usare create_file per
-        preparare script. È adatto anche a comandi locali autorizzati come nmap
-        su localhost. Il file temporaneo viene rimosso al termine, anche se
-        l'utente annulla l'esecuzione o si verifica un errore.
+        Il modello passa direttamente il codice, senza creare un file persistente.
+        Il contenuto è limitato a 64 KiB, salvato in un file temporaneo e
+        mostrato integralmente alla callback prima dell'esecuzione. Il comando
+        usa la sandbox come directory di lavoro, ma la sandbox non isola i
+        permessi del processo. Il gruppo viene terminato dopo 120 secondi;
+        l'output viene passato progressivamente a ``script_output`` e limitato
+        a 1 MiB. La cartella temporanea viene eliminata all'uscita dal blocco,
+        sia in caso di approvazione, rifiuto o eccezione. Per esempio, una
+        richiesta esplicita di scansione locale con nmap può passare il comando
+        limitato a ``127.0.0.1`` o ``::1`` da mostrare all'utente.
+
+        Args:
+            script: Codice Bash completo che l'utente ha chiesto di eseguire.
+
+        Returns:
+            Esito con codice di uscita oppure indicazione di annullamento.
+
+        Raises:
+            PermissionError: Nessuna callback di approvazione o processo root.
+            ValueError: Script troppo grande o contenente byte NUL.
+            RuntimeError: Sistema operativo non POSIX o output oltre il limite.
+            TimeoutError: Lo script supera il limite temporale.
         """
         if self.script_approval is None:
             raise PermissionError("L'esecuzione degli script non è abilitata senza approvazione GUI.")
@@ -283,6 +400,8 @@ class Agent:
             raise PermissionError("Per sicurezza, gli script non vengono eseguiti come root.")
 
         with tempfile.TemporaryDirectory(prefix="agente-script-") as temporary_directory:
+            # Il contesto temporaneo garantisce il tentativo di pulizia anche
+            # se l'approvazione rifiuta o l'esecuzione termina con eccezione.
             script_path = Path(temporary_directory) / "script.sh"
             script_path.write_bytes(script_bytes)
             nome_script = "script temporaneo (script.sh)"
@@ -291,6 +410,13 @@ class Agent:
             return self._execute_bash_script(script_path, nome_script)
 
     def _execute_bash_script(self, script_path: Path, display_name: str) -> str:
+        """Avvia Bash e inoltra l'output senza attendere che il buffer si riempia.
+
+        La lettura non bloccante tramite ``select`` permette di controllare
+        durata e byte totali mentre lo script è in esecuzione. Il gruppo di
+        processi viene terminato in caso di timeout, output eccessivo o errore
+        della callback di log.
+        """
         environment = {
             "PATH": os.environ.get("PATH", os.defpath),
             "HOME": str(self._sandbox_root()),
@@ -314,6 +440,7 @@ class Agent:
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         def terminate_process_group() -> None:
+            """Invia prima SIGTERM e poi SIGKILL al gruppo, aspettando la chiusura."""
             try:
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -380,12 +507,17 @@ class Agent:
         return f"Script temporaneo terminato con codice {return_code}."
 
     def _sandbox_root(self) -> Path:
+        """Restituisce la radice validata o segnala che manca la sandbox."""
         if self.sandbox is None:
             raise RuntimeError("Questa azione richiede una cartella sandbox.")
         return self.sandbox
 
     def extract_information(self, file_path: str, query: str) -> list[dict[str, Any]]:
-        """Estrae le righe che contengono il testo richiesto, con il numero di riga."""
+        """Estrae tutte le righe che contengono la query, senza distinzione di caso.
+
+        Ogni risultato è un dizionario con numero di riga (base 1) e testo
+        originale, così i chiamanti possono elaborare entrambi separatamente.
+        """
         path = self._sandbox_path(file_path)
         if not path.is_file():
             raise FileNotFoundError(f"Il file '{file_path}' non esiste nella sandbox.")
@@ -399,7 +531,11 @@ class Agent:
         ]
 
     def compare_files(self, first_path: str, second_path: str) -> str:
-        """Confronta due file di testo della sandbox e restituisce le differenze."""
+        """Confronta due file UTF-8 e restituisce un diff unificato.
+
+        Se i contenuti coincidono restituisce un messaggio esplicito invece
+        di una stringa vuota.
+        """
         first = self._sandbox_path(first_path)
         second = self._sandbox_path(second_path)
         if not first.is_file() or not second.is_file():
@@ -416,7 +552,11 @@ class Agent:
         return "\n".join(diff) or "I file non presentano differenze."
 
     def prepare_tasks(self, file_path: str) -> list[str]:
-        """Estrae da un file righe in formato checklist o con indicatori di attività."""
+        """Estrae elementi di checklist e righe che sembrano attività.
+
+        Riconosce marcatori Markdown, elenchi numerati e parole chiave italiane
+        o inglesi; restituisce il testo ripulito senza il marcatore iniziale.
+        """
         path = self._sandbox_path(file_path)
         if not path.is_file():
             raise FileNotFoundError(f"Il file '{file_path}' non esiste nella sandbox.")
@@ -449,9 +589,11 @@ class Agent:
         return tasks
 
     def send(self, message: str, role: str = "user"):
+        """Aggiunge un messaggio alla cronologia senza contattare il provider."""
         self.messages.append({"role": role, "content": message})
 
     def _stringify_tool_result(self, value):
+        """Converte i risultati dei tool in contenuto testuale per la chat."""
         if isinstance(value, (str, int, float, bool)) or value is None:
             return str(value)
         return json.dumps(value, ensure_ascii=False)
@@ -461,6 +603,21 @@ class Agent:
         on_response: Callable[[LLMResponse], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
     ) -> str | None:
+        """Interroga il modello e gestisce le chiamate agli strumenti finché termina.
+
+        Per ogni iterazione invia cronologia e descrizioni dei tool al provider.
+        Le tool call vengono eseguite nell'ordine ricevuto; i risultati entrano
+        nella cronologia con ruolo ``tool`` e vengono inviati al modello al
+        passaggio seguente. Gli errori diversi da una collisione di file
+        propagano al chiamante, così la GUI o la CLI possono mostrarli.
+
+        Args:
+            on_response: Callback facoltativa invocata per ogni risposta del modello.
+            on_tool_result: Callback facoltativa ``(nome, risultato)`` dopo ogni tool.
+
+        Returns:
+            Testo conclusivo del modello con eventuali fonti, oppure ``None``.
+        """
         while True:
             response = self.provider.complete(self.messages, list(self.tools.values()))
             if on_response is not None:

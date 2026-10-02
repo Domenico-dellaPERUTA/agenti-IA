@@ -1,3 +1,11 @@
+"""Adattatori che traducono il protocollo comune dell'agente nei provider LLM.
+
+Ogni adattatore riceve gli stessi messaggi e callable, converte i callable
+nello schema tool richiesto dal servizio e converte la risposta del servizio
+in ``LLMResponse``. Gli SDK opzionali vengono importati solo quando il relativo
+provider viene effettivamente usato.
+"""
+
 from __future__ import annotations
 
 import inspect
@@ -26,10 +34,16 @@ class OllamaProvider(LLMProvider):
     """
 
     def __init__(self, model: str, **kwargs):
+        """Memorizza il modello Ollama e le opzioni da inoltrare all'SDK."""
         self.model = model
         self.kwargs = kwargs
 
     def complete(self, messages: list[dict], tools: list[Callable] | None = None) -> LLMResponse:
+        """Invia messaggi e strumenti all'istanza Ollama locale selezionata.
+
+        L'importazione differita mantiene Ollama una dipendenza opzionale.
+        La risposta SDK viene normalizzata nell'oggetto comune del progetto.
+        """
         from ollama import chat
 
         tool_specs = None
@@ -53,6 +67,7 @@ class OllamaProvider(LLMProvider):
         )
 
     def _tool_to_schema(self, fn: Callable) -> dict[str, Any]:
+        """Traduce firma, tipi e docstring Python nello schema tool Ollama."""
         signature = inspect.signature(fn, eval_str=True)
         properties: dict[str, Any] = {}
         required: list[str] = []
@@ -86,6 +101,7 @@ class OllamaProvider(LLMProvider):
 
     @staticmethod
     def _annotation_to_json_type(annotation):
+        """Mappa i tipi Python supportati sui tipi JSON dello schema tool."""
         if annotation in (str,):
             return "string"
         if annotation in (int, float):
@@ -129,6 +145,11 @@ class OpenAIProvider(LLMProvider):
         base_url: str | None = None,
         api_key: str | None = None,
     ):
+        """Prepara un client OpenAI o compatibile con OpenAI.
+
+        Se ``client`` è fornito viene riutilizzato (utile per test e configurazioni
+        personalizzate); altrimenti il client SDK viene creato con URL e chiave.
+        """
         if client is None:
             from openai import OpenAI
 
@@ -138,6 +159,11 @@ class OpenAIProvider(LLMProvider):
         self.client = client
 
     def complete(self, messages: list[dict], tools: list[Callable] | None = None) -> LLMResponse:
+        """Chiama Chat Completions e converte testo e tool call nel formato comune.
+
+        In caso di errore di connessione, aggiunge l'URL configurato al messaggio
+        dell'eccezione per aiutare a correggere l'indirizzo del provider.
+        """
         tool_specs = None
         if tools:
             tool_specs = [self._tool_to_schema(tool) for tool in tools]
@@ -179,6 +205,7 @@ class OpenAIProvider(LLMProvider):
         )
 
     def _tool_to_schema(self, fn: Callable) -> dict[str, Any]:
+        """Costruisce lo schema funzione OpenAI leggendo firma e docstring."""
         signature = inspect.signature(fn, eval_str=True)
         properties: dict[str, Any] = {}
         required: list[str] = []
@@ -212,6 +239,7 @@ class OpenAIProvider(LLMProvider):
 
     @staticmethod
     def _annotation_to_json_type(annotation):
+        """Traduce annotazioni Python semplici nei tipi JSON di OpenAI."""
         if annotation in (str,):
             return "string"
         if annotation in (int, float):
@@ -257,6 +285,11 @@ class LMStudioProvider(OpenAIProvider):
         base_url: str = "http://localhost:1234/v1",
         client: Any | None = None,
     ):
+        """Configura l'adattatore OpenAI per il server locale di LM Studio.
+
+        ``api_key`` è impostata a un segnaposto perché l'endpoint locale
+        compatibile normalmente non richiede credenziali.
+        """
         super().__init__(
             model=model,
             client=client,

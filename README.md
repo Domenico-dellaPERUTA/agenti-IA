@@ -1,16 +1,59 @@
 # Agenti IA
 
-Agenti IA è un piccolo agente conversazionale in Python: invia richieste a un
-modello linguistico, esegue gli strumenti che il modello seleziona e può
-lavorare sui file di una cartella scelta come **sandbox**. Include
-un'interfaccia grafica (GUI), un avvio da terminale (CLI) e strumenti opzionali
-di ricerca e lettura di pagine web pubbliche.
+Agenti IA è una libreria Python progettata per semplificare lo sviluppo di
+agenti basati su modelli di intelligenza artificiale. Fornisce un nucleo per
+gestire conversazioni, collegare diversi provider di modelli linguistici,
+registrare strumenti utilizzabili dagli agenti e, facoltativamente, lavorare
+con file entro una cartella sandbox o consultare pagine web pubbliche.
+
+Il progetto include anche una GUI e una CLI dimostrative, utili come esempi di
+integrazione della libreria in applicazioni e strumenti futuri. Attualmente sono configurate per funzionare com LM Studio con il modello "qwen3-4b-2507", quindi è opportuno cambiare il codice per poterlo collegare correttamente al proprio modello remoto/locale.
 
 Il progetto è distribuito con licenza [MIT](./LICENSE).
 
 Per impostazione predefinita l'applicazione usa un modello servito localmente
 da **LM Studio**. Il progetto contiene anche provider compatibili con **Ollama**
 e con le API **OpenAI**.
+
+## Uso come libreria Python
+
+La GUI e la CLI sono esempi d'applicazione: non sono necessarie per integrare
+il nucleo della libreria in un altro programma. Il ciclo minimo si costruisce
+importando un provider, creando `Agent`, aggiungendo un messaggio e chiamando
+`run()`:
+
+```python
+from AI import Agent, LMStudioProvider
+
+provider = LMStudioProvider(model="qwen3-4b-2507")
+agent = Agent(
+    provider,
+    system_prompt="Sei un assistente utile e conciso.",
+)
+agent.send("Spiega brevemente cosa può fare questa libreria.")
+risposta = agent.run()
+print(risposta)
+```
+
+Per esporre gli strumenti standard di gestione file, passa a `Agent` una
+cartella già esistente come `sandbox`:
+
+```python
+from AI import Agent, LMStudioProvider
+
+agent = Agent(
+    LMStudioProvider(model="qwen3-4b-2507"),
+    sandbox="./sandbox",
+)
+agent.send("Elenca i file disponibili.")
+print(agent.run())
+```
+
+Il codice commentato di `AI/core.py`, `AI/providers.py` e `AI/web.py` descrive
+le API riutilizzabili; `agente_gui.py` e `agente.py` mostrano come integrarle
+rispettivamente in un'interfaccia grafica e in un terminale. Per aggiungere un
+provider, implementa `LLMProvider.complete()` restituendo `LLMResponse`; per
+aggiungere strumenti, registra funzioni con `Agent.add_tool()`.
 
 ## Funzionalità e limiti
 

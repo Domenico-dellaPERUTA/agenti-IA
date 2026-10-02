@@ -1,3 +1,10 @@
+"""Ricerca e lettura controllata di testo HTML pubblico via HTTPS GET.
+
+Questo modulo non è un browser: valida URL e DNS, rifiuta host non pubblici,
+fissa la connessione all'indirizzo validato e scarica soltanto HTML con limiti
+di dimensione, richieste e reindirizzamenti.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,6 +19,8 @@ import ssl
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlsplit, urlunsplit
 
 
+# Endpoint e limiti centralizzati: rendono esplicite le risorse massime che
+# una singola istanza può consumare durante una ricerca o lettura.
 SEARCH_URL = "https://html.duckduckgo.com/html/"
 LITE_SEARCH_URL = "https://lite.duckduckgo.com/lite/"
 MAX_QUERY_LENGTH = 300
@@ -45,15 +54,30 @@ _SENSITIVE_QUERY_KEY_PATTERN = re.compile(
 
 @dataclass(frozen=True)
 class WebSource:
+    """Descrive una fonte web e, facoltativamente, il suo estratto testuale.
+
+    L'oggetto è immutabile perché viene condiviso tra risultati di ricerca e
+    raccolta delle citazioni della sessione.
+    """
+
     title: str
     url: str
     snippet: str = ""
 
 
 class _SearchResultsParser(HTMLParser):
+    """Estrae titoli, URL e snippet dai due layout HTML di DuckDuckGo.
+
+    Le liste di tag e livelli di annidamento servono a ignorare script e stili
+    e a delimitare correttamente risultati composti da elementi HTML nidificati.
+    """
+
     def __init__(self) -> None:
+        """Inizializza lo stato usato dai callback incrementali di HTMLParser."""
         super().__init__(convert_charrefs=True)
         self.results: list[WebSource] = []
+        # Stato per il formato HTML standard: profondità div e buffer del
+        # risultato attualmente aperto consentono di chiuderlo al div giusto.
         self._inside_result = False
         self._result_div_depth = 0
         self._title_active = False
@@ -61,15 +85,18 @@ class _SearchResultsParser(HTMLParser):
         self._title: list[str] = []
         self._snippet: list[str] = []
         self._url = ""
+        # Stato separato per il layout Lite, che usa link e snippet differenti.
         self._lite_title_active = False
         self._lite_snippet_stack: list[str] = []
         self._lite_title: list[str] = []
         self._lite_snippet: list[str] = []
         self._lite_url = ""
+        # Ignora annidamenti dentro contenuti eseguibili o non visibili.
         self._suppress_depth = 0
         self._suppressed_tags: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Aggiorna i marcatori di parsing all'apertura di ogni tag HTML."""
         attributes = dict(attrs)
         classes = set((attributes.get("class") or "").split())
 
@@ -108,6 +135,7 @@ class _SearchResultsParser(HTMLParser):
             self._snippet_stack.append(tag)
 
     def handle_endtag(self, tag: str) -> None:
+        """Chiude le sezioni attive e materializza il risultato completo."""
         if self._suppressed_tags:
             if tag == self._suppressed_tags[-1]:
                 self._suppressed_tags.pop()
@@ -151,6 +179,7 @@ class _SearchResultsParser(HTMLParser):
                     self.results.append(WebSource(title=title, url=url, snippet=snippet))
 
     def handle_data(self, data: str) -> None:
+        """Accoda testo solo alla parte di risultato attualmente selezionata."""
         if self._suppress_depth:
             return
         if self._lite_title_active:
@@ -164,16 +193,21 @@ class _SearchResultsParser(HTMLParser):
 
 
 class _VisibleTextParser(HTMLParser):
+    """Converte una pagina HTML in testo, ignorando codice e contenuti nascosti."""
+
     def __init__(self) -> None:
+        """Prepara il buffer testuale e la pila dei tag da escludere."""
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self._suppressed_tags: list[str] = []
 
     def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
+        """Inizia a sopprimere il testo contenuto nei tag non visibili."""
         if tag in {"script", "style", "svg", "noscript", "template"}:
             self._suppressed_tags.append(tag)
 
     def handle_endtag(self, tag: str) -> None:
+        """Termina la soppressione o inserisce separatori tra blocchi testuali."""
         if self._suppressed_tags and tag == self._suppressed_tags[-1]:
             self._suppressed_tags.pop()
         elif not self._suppressed_tags and tag in {
@@ -182,12 +216,16 @@ class _VisibleTextParser(HTMLParser):
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
+        """Conserva testo HTML solo quando non è dentro un tag soppresso."""
         if not self._suppressed_tags:
             self.parts.append(data)
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Connessione HTTPS che usa un IP già validato mantenendo TLS sul dominio."""
+
     def __init__(self, hostname: str, address: str, timeout: int):
+        """Imposta hostname TLS originale e indirizzo IP fissato per il socket."""
         super().__init__(
             hostname,
             port=443,
@@ -197,6 +235,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._pinned_address = address
 
     def connect(self) -> None:
+        """Apre il socket verso l'IP validato e verifica il certificato TLS host."""
         sock = socket.create_connection(
             (self._pinned_address, self.port),
             self.timeout,
@@ -206,14 +245,24 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
 
 class InternetAccess:
-    """Ricerca e lettura web testuale, esclusivamente in HTTPS GET e senza autenticazione."""
+    """Ricerca e lettura web testuale con sole richieste HTTPS GET anonime.
+
+    Le fonti consultate e il contatore delle richieste appartengono all'istanza,
+    quindi la stessa istanza mantiene contesto e limiti durante una sessione.
+    """
 
     def __init__(self) -> None:
+        """Inizializza il registro delle fonti e il budget di rete della sessione."""
         self._sources: dict[str, WebSource] = {}
         self._request_count = 0
 
     def web_search(self, query: str) -> str:
-        """Cerca sul web testo pubblico e restituisce risultati con titolo, estratto e URL."""
+        """Cerca testo pubblico e restituisce al modello titoli, snippet e URL.
+
+        La query viene validata e codificata nell'URL di DuckDuckGo. Se il
+        layout HTML principale non produce risultati si tenta il layout Lite.
+        Le fonti trovate restano registrate per la citazione nella risposta.
+        """
         query = self._validate_query(query)
         results = self._parse_search_results(
             f"{SEARCH_URL}?q={quote_plus(query)}"
@@ -246,6 +295,7 @@ class InternetAccess:
         )
 
     def _parse_search_results(self, url: str) -> list[WebSource]:
+        """Scarica un motore di ricerca e normalizza un massimo di risultati unici."""
         body, content_type, _final_url = self._fetch_text(url)
         if content_type not in {"text/html", "application/xhtml+xml"}:
             raise ValueError("Il motore di ricerca ha restituito un formato non testuale.")
@@ -270,7 +320,11 @@ class InternetAccess:
         return results
 
     def read_webpage(self, url: str) -> str:
-        """Legge il testo visibile di una pagina HTML HTTPS, senza scaricare risorse o file."""
+        """Legge il solo testo visibile di una pagina HTML HTTPS pubblica.
+
+        Non interpreta JavaScript e non richiede immagini, fogli di stile,
+        moduli o altre risorse. Salva la pagina letta tra le fonti della sessione.
+        """
         body, content_type, final_url = self._fetch_text(url)
         if content_type not in {"text/html", "application/xhtml+xml"}:
             raise ValueError("Sono consentite solo pagine HTML pubbliche.")
@@ -291,11 +345,12 @@ class InternetAccess:
         return f"Fonte: {final_url}\n\n{_sanitize_text(text)}"
 
     def sources(self) -> list[tuple[str, str]]:
-        """Restituisce le fonti web consultate dall'agente nella sessione corrente."""
+        """Restituisce le coppie titolo/URL raccolte nell'ordine di inserimento."""
         return [(source.title, source.url) for source in self._sources.values()]
 
     @staticmethod
     def _validate_query(query: str) -> str:
+        """Normalizza la query e rifiuta input vuoto, eccessivo o sensibile."""
         if not isinstance(query, str):
             raise TypeError("La ricerca web richiede una query testuale.")
         query = query.strip()
@@ -314,6 +369,11 @@ class InternetAccess:
         return query
 
     def _fetch_text(self, url: str) -> tuple[str, str, str]:
+        """Segue solo redirect limitati e restituisce testo HTML decodificato.
+
+        Ogni destinazione viene sottoposta nuovamente alla validazione URL
+        prima della connessione, prevenendo redirect verso host locali.
+        """
         current_url = url
         for redirect_number in range(MAX_REDIRECTS + 1):
             status, headers, body = self._request_once(current_url)
@@ -346,6 +406,7 @@ class InternetAccess:
         raise RuntimeError("Impossibile completare la richiesta web.")
 
     def _request_once(self, url: str) -> tuple[int, dict[str, str], bytes]:
+        """Esegue un singolo GET con host validato e limiti sulla risposta."""
         parsed, hostname, address = self._validate_public_url(url)
         if self._request_count >= MAX_TOTAL_REQUESTS:
             raise RuntimeError(
@@ -404,6 +465,11 @@ class InternetAccess:
 
     @staticmethod
     def _validate_public_url(url: str):
+        """Convalida schema, credenziali, porta e tutti gli IP risolti.
+
+        Restituisce URL normalizzato, hostname e primo IP pubblico. Fissare
+        l'IP evita che una seconda risoluzione DNS cambi destinazione al connect.
+        """
         if not isinstance(url, str) or not url or len(url) > 2048:
             raise ValueError("L'URL deve essere valido e non superare 2048 caratteri.")
         parsed = urlsplit(url)
@@ -456,6 +522,7 @@ class InternetAccess:
 
 
 def _contains_sensitive_data(value: str) -> bool:
+    """Individua segreti nel testo decodificato o nelle chiavi dei parametri URL."""
     decoded_value = unquote(value)
     parsed = urlsplit(decoded_value)
     sensitive_query_key = any(
@@ -474,6 +541,7 @@ def _contains_sensitive_data(value: str) -> bool:
 
 
 def _sanitize_text(value: str) -> str:
+    """Oscura credenziali, percorsi personali ed email prima di esporre testo."""
     value = _SECRET_ASSIGNMENT_PATTERN.sub("[dato sensibile rimosso]", value)
     value = _TOKEN_PATTERN.sub("[credenziale rimossa]", value)
     value = _LOCAL_PATH_PATTERN.sub("[percorso locale rimosso]", value)
@@ -481,6 +549,7 @@ def _sanitize_text(value: str) -> str:
 
 
 def _unwrap_search_url(url: str) -> str:
+    """Rimuove il redirect interno di DuckDuckGo e accetta soltanto URL HTTPS."""
     if not url:
         return ""
     if url.startswith("//"):

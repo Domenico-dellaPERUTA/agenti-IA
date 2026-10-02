@@ -1,3 +1,12 @@
+"""Configurazione e CLI dimostrativa della libreria dell'agente.
+
+Le applicazioni future possono importare ``crea_agente`` e configurare
+provider, prompt e sandbox direttamente; ``main`` è solo un client terminale
+interattivo che mostra il flusso completo senza Tkinter.
+"""
+
+from __future__ import annotations
+
 from collections.abc import Callable
 import os
 from pathlib import Path
@@ -6,6 +15,7 @@ import sys
 from AI import Agent, InternetAccess, LMStudioProvider
 
 
+# Prompt usato per popolare in modo utile l'editor GUI al primo avvio.
 PROMPT_INIZIALE = "Elenca i file disponibili nella sandbox e dimmi cosa contiene note.txt."
 
 
@@ -15,7 +25,18 @@ def crea_agente(
     script_approval: Callable[[str, str], bool] | None = None,
     script_output: Callable[[str], None] | None = None,
 ) -> Agent:
-    """Crea l'agente con accesso ai soli file della cartella selezionata."""
+    """Crea un agente preconfigurato con provider, sandbox e strumenti web.
+
+    Args:
+        cartella_sandbox: Cartella radice per gli strumenti di gestione file.
+            Se omessa, usa ``sandbox/`` relativa alla directory corrente.
+        script_approval: Callback opzionale che autorizza ogni script dopo aver
+            mostrato il codice all'utente. Se omessa, il tool non è disponibile.
+        script_output: Callback opzionale per ricevere i log dello script.
+
+    Returns:
+        Agente configurato con strumenti file/web e fonti per le citazioni.
+    """
     percorso_sandbox = (
         cartella_sandbox if cartella_sandbox is not None else Path.cwd() / "sandbox"
     )
@@ -88,6 +109,7 @@ def crea_agente(
 
 
 def main() -> None:
+    """Avvia la CLI interattiva, con approvazione esplicita prima di Bash."""
     try:
         prompt = input("Richiesta per l'agente: ").strip()
     except EOFError:
@@ -98,6 +120,7 @@ def main() -> None:
         return
 
     def mostra_output(output: str) -> None:
+        """Scrive ogni blocco di output senza attenderne il completamento."""
         sys.stdout.write(output)
         sys.stdout.flush()
 
@@ -119,6 +142,7 @@ def main() -> None:
 
 
 def _approva_script_cli(file_path: str, script: str) -> bool:
+    """Stampa lo script completo e accetta solo la parola esatta ``ESEGUI``."""
     print(f"\nScript temporaneo da eseguire: {file_path}")
     print("Verifica il codice: opererà con i privilegi del tuo utente.")
     print("----- inizio script -----")
