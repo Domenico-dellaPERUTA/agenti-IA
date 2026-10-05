@@ -170,6 +170,38 @@ class WebAccessTests(TestCase):
         self.assertIn("Useful Lite result", result)
         self.assertEqual(fetch.call_count, 2)
 
+    def test_search_challenge_is_reported_instead_of_generic_empty_results(self):
+        challenge = (
+            "<html><body>Please email the following code to: "
+            "error-lite@example.com Code: c21b</body></html>"
+        )
+        with patch.object(
+            self.internet,
+            "_fetch_text",
+            return_value=(challenge, "text/html", ""),
+        ):
+            with self.assertRaisesRegex(
+                ToolExecutionError,
+                "verifica anti-automazione|limite temporaneo",
+            ):
+                self.internet.web_search("programmatore Caserta")
+
+    def test_search_challenge_is_reported_instead_of_generic_empty_results(self):
+        challenge = (
+            "<html><body>Please email the following code to: "
+            "error-lite@example.com Code: c21b</body></html>"
+        )
+        with patch.object(
+            self.internet,
+            "_fetch_text",
+            return_value=(challenge, "text/html", ""),
+        ):
+            with self.assertRaisesRegex(
+                ToolExecutionError,
+                "verifica anti-automazione|limite temporaneo",
+            ):
+                self.internet.web_search("programmatore Caserta")
+
     def test_unreadable_search_results_are_recoverable_and_agent_continues(self):
         with tempfile.TemporaryDirectory() as directory:
             provider = DummyProvider(
@@ -544,8 +576,44 @@ class WebAccessTests(TestCase):
 
         self.assertIn("printf 'cli output\\n'", displayed.getvalue())
         self.assertIn("cli output", displayed.getvalue())
-        self.assertIn("Risultato run_bash_script", displayed.getvalue())
+        self.assertIn("Agente · run_bash_script", displayed.getvalue())
         self.assertIn("Scansione completata.", displayed.getvalue())
+        self.assertIn("💬 ", displayed.getvalue())
+        self.assertIn("⚙️ ", displayed.getvalue())
+
+    def test_cli_main_uses_timestamped_agent_blocks_without_duplicate_final_answer(self):
+        provider = DummyProvider([LLMResponse(content="Risposta di prova.")])
+        displayed = StringIO()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(agente_module, "LMStudioProvider", return_value=provider),
+            patch("builtins.input", side_effect=["Richiesta di prova", ""]),
+            patch.object(
+                agente_module,
+                "crea_agente",
+                wraps=lambda *args, **kwargs: agente_module.Agent(
+                    provider,
+                    sandbox=directory,
+                    script_approval=kwargs.get("script_approval"),
+                    script_output=kwargs.get("script_output"),
+                ),
+            ),
+            redirect_stdout(displayed),
+        ):
+            agente_module.main()
+
+        output = displayed.getvalue()
+        self.assertRegex(
+            output,
+            r"💬 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · Utente\n"
+            r"   Richiesta di prova",
+        )
+        self.assertRegex(
+            output,
+            r"⚙️ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · Risultato finale\n"
+            r"   Risposta di prova\.",
+        )
+        self.assertEqual(output.count("Risposta di prova."), 1)
 
     def test_tool_schema_exposes_no_write_or_http_mutation_tool(self):
         self.assertEqual(

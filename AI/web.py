@@ -318,6 +318,12 @@ class InternetAccess:
         parser = _SearchResultsParser()
         parser.feed(body)
         parser.close()
+        if not parser.results and _is_search_challenge(body):
+            raise ToolExecutionError(
+                "Il motore di ricerca ha restituito una verifica anti-automazione "
+                "o un limite temporaneo, non risultati. Riprova più tardi o consulta "
+                "un'altra fonte autorizzata."
+            )
         results = []
         seen: set[str] = set()
         for source in parser.results:
@@ -555,6 +561,21 @@ def _contains_sensitive_data(value: str) -> bool:
             _TOKEN_PATTERN,
             _LOCAL_PATH_PATTERN,
             _SECRET_ASSIGNMENT_PATTERN,
+        )
+    )
+
+
+def _is_search_challenge(body: str) -> bool:
+    """Riconosce pagine di verifica/blocco invece di scambiarle per zero risultati."""
+    normalized = body.casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "please email the following code",
+            "error-lite",
+            "unusual traffic",
+            "verify you are human",
+            "prove you are not a robot",
         )
     )
 

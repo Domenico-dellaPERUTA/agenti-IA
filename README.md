@@ -59,8 +59,21 @@ Ogni worker riceve le proprie istruzioni e soltanto l'eventuale contesto
 selezionato per quel task, non la cronologia o il contesto degli altri worker.
 Se il planner seleziona `direct` ma restituisce anche task, l'app avvisa
 l'utente e segue la modalità diretta, ignorando i task incoerenti: questo
-mantiene disponibili gli strumenti necessari per completare la richiesta
-originale, inclusa la creazione di file.
+evita che un piano incoerente blocchi la richiesta originale.
+Quando la richiesta chiede esplicitamente un file, l'app verifica che
+`create_file` abbia restituito un esito positivo prima di mostrare la risposta
+finale come completata. Se manca, consente un solo tentativo aggiuntivo; se
+anche quello fallisce, mostra un errore invece di accettare una dichiarazione
+del modello come prova che il file esista.
+Dopo una creazione verificata, il riepilogo finale usa il percorso restituito
+da `create_file` e non può essere contraddetto da una successiva risposta del
+modello.
+Per le richieste che combinano ricerca web e creazione di un file, la raccolta
+dei risultati e la scrittura sono affidate ad agenti separati: il ricercatore
+può usare solo gli strumenti web di lettura e il writer, avviato dopo la ricerca
+(e la sintesi nel flusso parallelo), dispone esclusivamente di `create_file`.
+Se le fonti non restituiscono dati leggibili, il file segnala il limite
+dell'esecuzione corrente senza sostenere che non esistano altre offerte o fonti.
 Le richieste che richiedono modifiche a file, script o una singola azione
 passano invece al normale agente, che conserva le conferme esplicite già
 previste dall'applicazione.
@@ -110,12 +123,18 @@ aggiungere strumenti, registra funzioni con `Agent.add_tool()`.
   esito di quella singola lettura; l'agente può continuare con le altre fonti
   e indicare quali non erano accessibili.
   Se DuckDuckGo non restituisce risultati leggibili, vengono tentati entrambi
-  i layout supportati e il limite viene riportato come risultato dello
-  strumento, così l'agente può proseguire senza inventare fonti.
+  i layout supportati; se il motore presenta una verifica anti-automazione o
+  un limite temporaneo, viene segnalato esplicitamente come tale invece di
+  apparire come una ricerca con zero risultati.
 - Le ricerche web inviano la query a DuckDuckGo. Non inserirvi informazioni
   private, credenziali o contenuti della sandbox. I risultati web sono
   contenuti non attendibili; l'agente li tratta come fonti e aggiunge le
   citazioni alla risposta.
+- Il log GUI separa gli eventi in blocchi: ogni intestazione mostra un'icona,
+  data e ora locale, agente e strumento quando pertinente; la descrizione
+  dell'attività segue su una riga indentata.
+- La CLI usa lo stesso formato a blocchi per richiesta, risposte intermedie,
+  risultati degli strumenti e risposta finale.
 - Il progetto non include un modello linguistico: occorre installare e avviare
   un provider compatibile (vedi [Configurazione del modello](#configurazione-del-modello)).
 

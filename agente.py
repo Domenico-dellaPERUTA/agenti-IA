@@ -8,6 +8,7 @@ interattivo che mostra il flusso completo senza Tkinter.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from datetime import datetime
 import os
 from pathlib import Path
 import sys
@@ -147,11 +148,11 @@ def main() -> None:
     if not prompt:
         print("La richiesta non può essere vuota.")
         return
+    _stampa_output_cli("💬", "Utente", prompt)
 
     def mostra_output(output: str) -> None:
-        """Scrive ogni blocco di output senza attenderne il completamento."""
-        sys.stdout.write(output)
-        sys.stdout.flush()
+        """Mostra l'output dello script con autore e orario."""
+        _stampa_output_cli("💻", "Script", output.rstrip("\n"))
 
     agent = crea_agente(
         script_approval=_approva_script_cli,
@@ -160,14 +161,27 @@ def main() -> None:
     agent.send(prompt)
     result = agent.run(
         on_response=lambda response: (
-            print(f"Modello:\n{response.content}\n")
-            if response.content
+            _stampa_output_cli("🤖", "Agente", response.content)
+            if response.content and response.tool_calls
             else None
         ),
-        on_tool_result=lambda name, result: print(f"Risultato {name}: {result}"),
+        on_tool_result=lambda name, value: _stampa_output_cli(
+            "🛠️",
+            f"Agente · {name}",
+            f"Risultato strumento:\n{value}",
+        ),
     )
     if result:
-        print(result)
+        _stampa_output_cli("⚙️", "Risultato finale", result)
+
+
+def _stampa_output_cli(icona: str, agente: str, descrizione: str) -> None:
+    """Stampa un blocco CLI con icona, orario, autore e testo indentato."""
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    lines = descrizione.strip().splitlines() or [""]
+    print(f"{icona} {timestamp} · {agente}")
+    print("\n".join(f"   {line}" for line in lines))
+    print()
 
 
 def _approva_script_cli(file_path: str, script: str) -> bool:

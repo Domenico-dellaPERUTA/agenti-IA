@@ -13,6 +13,8 @@ class FakeAgent:
         self.messages = [{"role": "system", "content": system_prompt}]
         self.tools = {"unsafe_tool": lambda: None}
         self.allowed_tools = None
+        self.direct_runs = 0
+        self.writer_runs = 0
 
     def restrict_tools(self, allowed_tools):
         if self.allowed_tools is not None:
@@ -31,11 +33,38 @@ class FakeAgent:
             answer = self.state["plan"]
         elif "sintesi" in self.system_prompt:
             self.state["syntheses"] += 1
+            self.state["phase_order"].append("synthesis")
             self.state["synthesis_prompt"] = self.messages[-1]["content"]
             answer = self.state.get("synthesis_answer", "Risposta sintetica")
+        elif "agente di ricerca web" in self.system_prompt:
+            self.state["phase_order"].append("research")
+            answer = self.state.get("research_answer", "Risultati verificabili e fonti")
+        elif "agente dedicato esclusivamente alla creazione" in self.system_prompt:
+            self.writer_runs += 1
+            self.state["writer_runs"] += 1
+            self.state["phase_order"].append("writer")
+            if (
+                self.writer_runs > 1
+                and self.state.get("create_file_on_retry")
+                and on_tool_result is not None
+            ):
+                on_tool_result("create_file", "Creato: risultati.txt")
+            answer = self.state.get("writer_answer", "Il file risultati.txt è stato creato.")
         elif "Completa tutte le azioni esplicitamente richieste" in self.system_prompt:
             self.state["direct_runs"] += 1
-            answer = self.state.get("direct_answer", "Risposta diretta")
+            self.direct_runs += 1
+            if (
+                self.direct_runs > 1
+                and self.state.get("create_file_on_retry")
+                and on_tool_result is not None
+            ):
+                on_tool_result("create_file", "Creato: risultati.txt")
+            answer = self.state.get(
+                "direct_answer",
+                "Il file risultati.txt è stato creato."
+                if self.direct_runs > 1 and self.state.get("create_file_on_retry")
+                else "Risposta diretta",
+            )
         else:
             prompt = self.messages[-1]["content"]
             if "fallisci" in prompt:
@@ -71,7 +100,10 @@ class OrchestrationTests(unittest.TestCase):
             "max_active": 0,
             "lock": threading.Lock(),
             "direct_runs": 0,
+            "create_file_on_retry": False,
+            "writer_runs": 0,
             "syntheses": 0,
+            "phase_order": [],
         }
 
         def factory(system_prompt):
@@ -141,7 +173,7 @@ class OrchestrationTests(unittest.TestCase):
         orchestrator, state = self.make_orchestrator(plan)
         events = []
 
-        result = orchestrator.run("Cerca informazioni e crea un file", on_event=events.append)
+        result = orchestrator.run("Cerca informazioni e riassumi le fonti", on_event=events.append)
 
         self.assertEqual(result.mode, "direct")
         self.assertEqual(result.answer, "Risposta diretta")
@@ -151,6 +183,109 @@ class OrchestrationTests(unittest.TestCase):
         warning = next(event for event in events if event["type"] == "plan_warning")
         self.assertIn("2 task", warning["message"])
         self.assertIn("saranno ignorati", warning["message"])
+
+    def test_requested_file_gets_one_retry_and_requires_successful_tool(self):
+        orchestrator, state = self.make_orchestrator('{"mode":"direct","tasks":[]}')
+        state["create_file_on_retry"] = True
+        state["writer_answer"] = "Il file non è stato creato."
+        events = []
+
+        result = orchestrator.run(
+            "Cerca annunci e creami un file txt con i risultati",
+            on_event=events.append,
+        )
+
+        self.assertTrue(result.answer.endswith("File creato: risultati.txt"))
+        self.assertNotIn("non è stato creato", result.answer)
+        self.assertEqual(state["direct_runs"], 0)
+        self.assertEqual(state["writer_runs"], 2)
+        self.assertEqual(state["phase_order"], ["research", "writer", "writer"])
+        researcher, writer = state["agents"][1:]
+        self.assertEqual(researcher.allowed_tools, frozenset({"web_search", "read_webpage"}))
+        self.assertEqual(writer.allowed_tools, frozenset({"create_file"}))
+        self.assertIn(
+            ("Agente di creazione file", "Creato: risultati.txt"),
+            [
+                (event.get("title"), event.get("message"))
+                for event in events
+                if event["type"] == "tool_result"
+            ],
+        )
+        self.assertTrue(any(event["type"] == "agent_retry" for event in events))
+        self.assertIn("create_file", writer.messages[-1]["content"])
+        self.assertNotIn(
+            "Il file non è stato creato.",
+            [event.get("message") for event in events],
+        )
+
+    def test_requested_file_is_not_reported_as_created_without_tool_success(self):
+        orchestrator, state = self.make_orchestrator('{"mode":"direct","tasks":[]}')
+        state["writer_answer"] = "Il file richiesti.txt è stato creato."
+        events = []
+
+        with self.assertRaisesRegex(OrchestrationError, "non ha verificato"):
+            orchestrator.run(
+                "Cerca e creami un file con i risultati",
+                on_event=events.append,
+            )
+
+        self.assertEqual(state["direct_runs"], 0)
+        self.assertEqual(state["writer_runs"], 2)
+        self.assertNotIn(
+            "Il file richiesti.txt è stato creato.",
+            [event.get("message") for event in events],
+        )
+        self.assertIn(
+            ("file_writer", "agent_failed"),
+            [
+                (event.get("agent_id"), event["type"])
+                for event in events
+                if event["type"].startswith("agent_")
+            ],
+        )
+        self.assertNotIn(
+            ("file_writer", "agent_completed"),
+            [
+                (event.get("agent_id"), event["type"])
+                for event in events
+                if event["type"].startswith("agent_")
+            ],
+        )
+
+    def test_parallel_file_writer_starts_after_all_research_and_synthesis(self):
+        orchestrator, state = self.make_orchestrator(
+            self.parallel_plan(
+                self.task("first", "risultato prima fonte"),
+                self.task("second", "risultato seconda fonte"),
+            )
+        )
+        state["create_file_on_retry"] = True
+        events = []
+
+        result = orchestrator.run(
+            "Fai una ricerca e crea un file txt con i risultati",
+            on_event=events.append,
+        )
+
+        self.assertTrue(result.answer.endswith("File creato: risultati.txt"))
+        self.assertEqual(state["phase_order"][-3:], ["synthesis", "writer", "writer"])
+        self.assertEqual(state["writer_runs"], 2)
+        self.assertEqual(
+            [agent.allowed_tools for agent in state["agents"][1:3]],
+            [frozenset({"web_search", "read_webpage"})] * 2,
+        )
+        completed_positions = [
+            index for index, event in enumerate(events)
+            if event["type"] == "task_completed"
+        ]
+        writer_started = next(
+            index for index, event in enumerate(events)
+            if event.get("agent_id") == "file_writer"
+            and event["type"] == "agent_started"
+        )
+        self.assertEqual(len(completed_positions), 2)
+        self.assertTrue(all(index < writer_started for index in completed_positions))
+        self.assertEqual(state["agents"][-1].allowed_tools, frozenset({"create_file"}))
 
     def test_parallel_results_follow_plan_order_and_worker_limit(self):
         orchestrator, state = self.make_orchestrator(

@@ -10,6 +10,7 @@ Per integrare la libreria in un'altra applicazione si può usare direttamente
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 import queue
 import sys
@@ -243,7 +244,7 @@ class AgenteGUI:
             return
 
         self._pulisci_lista_agenti()
-        self._aggiungi_output(f"> {prompt}\n\n")
+        self._aggiungi_output_etichettato("Utente", f"> {prompt}\n\n")
         self.pulsante_avvia.configure(state=tk.DISABLED)
         self.stato.set("Orchestratore in esecuzione...")
         self.window.update_idletasks()
@@ -337,7 +338,7 @@ class AgenteGUI:
             while True:
                 tipo, contenuto = self.events.get_nowait()
                 if tipo == "output":
-                    self._aggiungi_output(str(contenuto))
+                    self._aggiungi_output_etichettato("Script", str(contenuto))
                 elif tipo == "orchestrator_event":
                     if not isinstance(contenuto, dict):
                         raise TypeError("Evento dell'orchestratore non valido.")
@@ -349,7 +350,8 @@ class AgenteGUI:
                 elif tipo == "risultato":
                     if isinstance(contenuto, OrchestrationResult):
                         answer = contenuto.answer
-                        self._aggiungi_output(
+                        self._aggiungi_output_etichettato(
+                            "Orchestratore",
                             "Risultato finale:\n"
                             f"{answer if answer else '(nessuna sintesi disponibile)'}\n\n"
                         )
@@ -360,13 +362,17 @@ class AgenteGUI:
                             "Completato con errori" if has_failures else "Completato"
                         )
                     else:
-                        self._aggiungi_output(
+                        self._aggiungi_output_etichettato(
+                            "Orchestratore",
                             f"Risultato finale:\n{contenuto or '(nessun risultato)'}\n\n"
                         )
                         self.stato.set("Completato")
                     self.pulsante_avvia.configure(state=tk.NORMAL)
                 elif tipo == "errore":
-                    self._aggiungi_output(f"Errore durante l'esecuzione: {contenuto}\n\n")
+                    self._aggiungi_output_etichettato(
+                        "Orchestratore",
+                        f"Errore durante l'esecuzione: {contenuto}\n\n",
+                    )
                     self._segna_agenti_in_corso_come_errore(str(contenuto))
                     self.stato.set("Errore")
                     self.pulsante_avvia.configure(state=tk.NORMAL)
@@ -379,20 +385,32 @@ class AgenteGUI:
         event_type = event.get("type")
         title = event.get("title") or event.get("task_id") or "Attività"
         message = event.get("message", "")
+        agent_id = event.get("agent_id", "")
+        agent_names = {
+            "planner": "Pianificatore",
+            "direct": "Agente diretto",
+            "researcher": "Agente di ricerca",
+            "file_writer": "Agente creazione file",
+            "synthesizer": "Agente sintetizzatore",
+        }
+        actor = title if event.get("task_id") else agent_names.get(agent_id, title)
         if event_type == "planning_started":
             self.stato.set("Pianificazione della richiesta...")
+            self._aggiungi_output_etichettato("Orchestratore", message)
         elif event_type == "agent_started":
             self._imposta_stato_agente(
                 event.get("agent_id", event.get("role", title)),
                 title,
                 "running",
             )
+            self._aggiungi_output_etichettato(actor, "Avviato")
         elif event_type == "agent_completed":
             self._imposta_stato_agente(
                 event.get("agent_id", event.get("role", title)),
                 title,
                 "completed",
             )
+            self._aggiungi_output_etichettato(actor, "Completato")
         elif event_type == "agent_failed":
             self._imposta_stato_agente(
                 event.get("agent_id", event.get("role", title)),
@@ -400,24 +418,36 @@ class AgenteGUI:
                 "failed",
                 event.get("error", "Errore non specificato"),
             )
+            self._aggiungi_output_etichettato(
+                actor,
+                f"Errore: {event.get('error', 'Errore non specificato')}",
+            )
         elif event_type == "plan_warning":
-            self._aggiungi_output(f"Nota sul piano: {message}\n\n")
+            self._aggiungi_output_etichettato(
+                "Pianificatore",
+                f"Nota sul piano: {message}\n\n",
+            )
+        elif event_type == "agent_retry":
+            self._aggiungi_output_etichettato(actor, f"Nuovo tentativo: {message}\n\n")
         elif event_type == "mode_selected":
-            self._aggiungi_output(f"{message}\n\n")
+            self._aggiungi_output_etichettato("Orchestratore", f"{message}\n\n")
         elif event_type == "task_started":
             self._imposta_stato_agente(
                 f"task:{event.get('task_id', title)}",
                 title,
                 "running",
             )
-            self._aggiungi_output(f"Attività avviata: {title}\n")
+            self._aggiungi_output_etichettato(actor, f"Attività avviata: {title}\n")
         elif event_type == "task_completed":
             self._imposta_stato_agente(
                 f"task:{event.get('task_id', title)}",
                 title,
                 "completed",
             )
-            self._aggiungi_output(f"Attività completata: {title}\n{message}\n\n")
+            self._aggiungi_output_etichettato(
+                actor,
+                f"Attività completata: {title}\n{message}\n\n",
+            )
         elif event_type == "task_failed":
             error = event.get("error", "Errore non specificato")
             self._imposta_stato_agente(
@@ -426,21 +456,39 @@ class AgenteGUI:
                 "failed",
                 error,
             )
-            self._aggiungi_output(
+            self._aggiungi_output_etichettato(
+                actor,
                 f"Attività non riuscita: {title}\n"
                 f"{error}\n\n"
             )
         elif event_type == "synthesis_started":
             self.stato.set("Sintesi dei risultati...")
+            self._aggiungi_output_etichettato("Agente sintetizzatore", message)
         elif event_type == "model_response":
-            prefix = f"Modello - {title}:\n" if event.get("task_id") else "Modello:\n"
-            self._aggiungi_output(f"{prefix}{message}\n\n")
+            self._aggiungi_output_etichettato(
+                actor,
+                f"Risposta del modello:\n{message}\n\n",
+            )
         elif event_type == "tool_result":
-            self._aggiungi_output(f"Risultato {title}: {message}\n")
+            tool_actor = (
+                f"{actor} · {event.get('tool_name', title)}"
+                if agent_id
+                else actor
+            )
+            self._aggiungi_output_etichettato(
+                tool_actor,
+                f"Risultato strumento: {message}\n",
+            )
         elif event_type == "tool_selected":
-            self._aggiungi_output(f"Azione selezionata dal modello: {message}\n")
+            self._aggiungi_output_etichettato(
+                actor,
+                f"Azione selezionata: {message}\n",
+            )
         else:
-            self._aggiungi_output(f"Evento orchestratore non riconosciuto: {event}\n")
+            self._aggiungi_output_etichettato(
+                "Orchestratore",
+                f"Evento non riconosciuto: {event}\n",
+            )
 
     def _segna_agenti_in_corso_come_errore(self, error: str) -> None:
         """Rende visibile l'errore finale sugli agenti rimasti in esecuzione."""
@@ -460,6 +508,29 @@ class AgenteGUI:
         self.output.insert(tk.END, testo)
         self.output.see(tk.END)
         self.output.configure(state=tk.DISABLED)
+
+    def _aggiungi_output_etichettato(self, agente: str, testo: str) -> None:
+        """Aggiunge un blocco leggibile con icona, data, ora e autore."""
+        icons = (
+            ("Utente", "💬"),
+            ("Pianificatore", "🧭"),
+            ("Orchestratore", "⚙️"),
+            ("Agente di ricerca", "🔎"),
+            ("Agente creazione file", "📝"),
+            ("Agente di creazione file", "📝"),
+            ("Agente sintetizzatore", "🧩"),
+            ("Script", "💻"),
+        )
+        icon = next(
+            (symbol for name, symbol in icons if agente.startswith(name)),
+            "🔹",
+        )
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        lines = testo.strip().splitlines() or [""]
+        description = "\n".join(f"   {line}" for line in lines)
+        self._aggiungi_output(
+            f"{icon} {timestamp} · {agente}\n{description}\n\n"
+        )
 
 
 if __name__ == "__main__":

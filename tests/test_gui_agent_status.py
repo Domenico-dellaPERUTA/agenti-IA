@@ -1,3 +1,4 @@
+import re
 import unittest
 
 from agente_gui import AgenteGUI
@@ -33,7 +34,58 @@ class GuiAgentStatusTests(unittest.TestCase):
         self.gui = AgenteGUI.__new__(AgenteGUI)
         self.gui.agent_list = FakeTreeview()
         self.gui.agent_rows = {}
-        self.gui._aggiungi_output = lambda _text: None
+        self.gui.output_lines = []
+        self.gui._aggiungi_output = self.gui.output_lines.append
+
+    def test_output_identifies_timestamp_and_agent_for_search_events(self):
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "tool_result",
+                "agent_id": "researcher",
+                "title": "Agente di ricerca",
+                "tool_name": "web_search",
+                "message": "Risultati trovati",
+            }
+        )
+
+        self.assertEqual(len(self.gui.output_lines), 1)
+        self.assertRegex(
+            self.gui.output_lines[0],
+            re.compile(
+                r"^🔎 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · "
+                r"Agente di ricerca · web_search\n"
+                r"   Risultato strumento: Risultati trovati\n\n$"
+            ),
+        )
+
+    def test_output_identifies_orchestrator_for_mode_event(self):
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "mode_selected",
+                "message": "Esecuzione diretta",
+            }
+        )
+
+        self.assertRegex(
+            self.gui.output_lines[0],
+            r"^⚙️ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · "
+            r"Orchestratore\n   Esecuzione diretta\n\n$",
+        )
+
+    def test_multiline_tool_output_is_indented_in_a_separate_block(self):
+        self.gui._aggiungi_output_etichettato(
+            "Agente di ricerca",
+            "Risultati strumento:\n- prima fonte\n- seconda fonte",
+        )
+
+        self.assertRegex(
+            self.gui.output_lines[0],
+            r"^🔎 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · "
+            r"Agente di ricerca\n"
+            r"   Risultati strumento:\n"
+            r"   - prima fonte\n"
+            r"   - seconda fonte\n\n$",
+        )
 
     def test_agent_status_updates_existing_row_and_color_tag(self):
         self.gui._gestisci_evento_orchestratore(
