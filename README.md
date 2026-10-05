@@ -49,6 +49,42 @@ agent.send("Elenca i file disponibili.")
 print(agent.run())
 ```
 
+### Orchestratore multiagente
+
+La GUI usa un agente coordinatore che sceglie tra esecuzione diretta e
+decomposizione in attività indipendenti. I worker hanno cronologie separate,
+sono avviati con concorrenza limitata e ricevono solo strumenti di lettura;
+un agente distinto sintetizza i risultati e segnala le attività non riuscite.
+Ogni worker riceve le proprie istruzioni e soltanto l'eventuale contesto
+selezionato per quel task, non la cronologia o il contesto degli altri worker.
+Se il planner seleziona `direct` ma restituisce anche task, l'app avvisa
+l'utente e segue la modalità diretta, ignorando i task incoerenti: questo
+mantiene disponibili gli strumenti necessari per completare la richiesta
+originale, inclusa la creazione di file.
+Le richieste che richiedono modifiche a file, script o una singola azione
+passano invece al normale agente, che conserva le conferme esplicite già
+previste dall'applicazione.
+
+L'orchestratore si può usare anche senza GUI:
+
+```python
+from agente import crea_orchestratore
+
+orchestratore = crea_orchestratore("./sandbox", max_workers=2)
+risultato = orchestratore.run(
+    "Confronta le date, i costi e i rischi descritti nei documenti."
+)
+print(risultato.answer)
+for task in risultato.tasks:
+    print(task.task_id, task.status, task.error or "")
+```
+
+`max_workers` è compreso tra 1 e 4; il numero di task pianificati è limitato a
+5. La concorrenza effettiva dipende dal runtime locale e dalle risorse
+disponibili, quindi più worker non garantiscono risposte più rapide. La GUI
+continua ad accettare una sola richiesta utente alla volta: il parallelismo
+riguarda i worker della singola richiesta, non conversazioni persistenti.
+
 Il codice commentato di `AI/core.py`, `AI/providers.py` e `AI/web.py` descrive
 le API riutilizzabili; `agente_gui.py` e `agente.py` mostrano come integrarle
 rispettivamente in un'interfaccia grafica e in un terminale. Per aggiungere un
@@ -69,7 +105,13 @@ aggiungere strumenti, registra funzioni con `Agent.add_tool()`.
   annullata. L'output standard e gli errori appaiono nella console della GUI.
 - Può cercare sul web con DuckDuckGo e leggere il testo visibile di pagine
   pubbliche. Le richieste web sono solo HTTPS GET: niente login, moduli,
-  caricamenti o download.
+  caricamenti o download. Se una pagina restituisce un errore HTTP (per
+  esempio `403 Forbidden`), l'errore viene mostrato e passato al modello come
+  esito di quella singola lettura; l'agente può continuare con le altre fonti
+  e indicare quali non erano accessibili.
+  Se DuckDuckGo non restituisce risultati leggibili, vengono tentati entrambi
+  i layout supportati e il limite viene riportato come risultato dello
+  strumento, così l'agente può proseguire senza inventare fonti.
 - Le ricerche web inviano la query a DuckDuckGo. Non inserirvi informazioni
   private, credenziali o contenuti della sandbox. I risultati web sono
   contenuti non attendibili; l'agente li tratta come fonti e aggiunge le
@@ -203,7 +245,10 @@ python agente_gui.py
 
 La finestra permette di scegliere la cartella sandbox, scrivere una richiesta
 e inviarla con il pulsante o con **Ctrl+Invio**. La sandbox predefinita è
-`sandbox/` nella cartella del progetto. Se l'agente propone di eseguire uno
+`sandbox/` nella cartella del progetto. Il pulsante **Info strumenti** descrive
+le azioni disponibili e le relative cautele; la tabella degli agenti mostra in
+tempo reale pianificatore, worker e sintetizzatore con un indicatore colorato
+per stato. Se l'agente propone di eseguire uno
 script Bash, la GUI mostra il contenuto completo e avvisa che lo script opera
 con i privilegi dell'utente corrente; si può approvare o annullare. Lo script
 temporaneo e i file temporanei destinati al comando vengono eliminati al
@@ -270,12 +315,16 @@ risposte di rete e del modello sono simulate nei test.
 ├── AI/
 │   ├── __init__.py
 │   ├── core.py
+│   ├── orchestration.py
 │   ├── providers.py
 │   └── web.py
 ├── sandbox/
 │   └── note.txt
 ├── tests/
 │   ├── test_agent_tools.py
+│   ├── test_app_orchestration.py
+│   ├── test_gui_agent_status.py
+│   ├── test_orchestration.py
 │   └── test_web_access.py
 └── .vscode/
     ├── launch.json
@@ -293,9 +342,11 @@ risposte di rete e del modello sono simulate nei test.
 - [`requirements.txt`](./requirements.txt): dipendenze Python richieste dal
   provider configurato (`openai`).
 - [`AI/__init__.py`](./AI/__init__.py): espone le classi pubbliche del package
-  (`Agent`, `InternetAccess`, `LLMProvider`, `LLMResponse`, `ToolCall` e i
-  provider).
+  (`Agent`, `AgenteOrchestratore`, i modelli di risultato, `InternetAccess`,
+  `LLMProvider`, `LLMResponse`, `ToolCall` e i provider).
 - [`AI/core.py`](./AI/core.py): logica di conversazione e strumenti sandbox.
+- [`AI/orchestration.py`](./AI/orchestration.py): modelli dei task, validazione
+  del piano e coordinamento limitato di pianificatore, worker e sintetizzatore.
 - [`AI/providers.py`](./AI/providers.py): adattatori per i diversi servizi
   linguistici.
 - [`AI/web.py`](./AI/web.py): ricerca e lettura web in sola lettura.
@@ -304,6 +355,14 @@ risposte di rete e del modello sono simulate nei test.
   installazione a installazione.
 - [`tests/test_agent_tools.py`](./tests/test_agent_tools.py): test degli
   strumenti sandbox, dei limiti dei percorsi e degli schemi tool.
+- [`tests/test_orchestration.py`](./tests/test_orchestration.py): test di
+  validazione dei piani, limiti di concorrenza, isolamento, ordinamento e
+  gestione dei fallimenti.
+- [`tests/test_app_orchestration.py`](./tests/test_app_orchestration.py):
+  verifica la factory applicativa e la creazione di agenti indipendenti con la
+  stessa configurazione.
+- [`tests/test_gui_agent_status.py`](./tests/test_gui_agent_status.py): verifica
+  le transizioni di stato e gli indicatori per agenti e task nella GUI.
 - [`tests/test_web_access.py`](./tests/test_web_access.py): test dei parser
   web, della validazione delle query/URL, dei limiti di rete e
   dell'integrazione con l'agente.
@@ -328,13 +387,28 @@ risposte di rete e del modello sono simulate nei test.
 - `LLMResponse`: testo restituito dal modello e, se presenti, chiamate agli
   strumenti.
 - `LLMProvider`: interfaccia base; i provider implementano `complete(...)`.
+- `ToolExecutionError`: errore esplicito di uno strumento che viene riportato
+  al modello come risultato, così può proseguire senza considerare riuscita
+  l'operazione fallita.
 - `Agent`: gestisce cronologia, strumenti, sandbox e ciclo delle tool call.
   `send(...)` aggiunge un messaggio e `run(...)` interroga il provider ed
   esegue gli strumenti disponibili. Con una sandbox registra:
   `list_files`, `search_text`, `read_file_excerpt`, `create_file`,
   `append_to_file`, `move_file`, `extract_information`, `compare_files` e
-  `prepare_tasks`. Le azioni possono essere sostituite con callback tramite
-  il parametro `actions`.
+  `prepare_tasks`. Una allowlist opzionale limita gli strumenti registrati;
+  `restrict_tools(...)` consente solo di restringere ulteriormente l'accesso.
+  Le azioni possono essere sostituite con callback tramite il parametro
+  `actions`.
+
+#### `AI/orchestration.py`
+
+- `TaskSpec`, `TaskResult` e `OrchestrationResult`: dati immutabili per
+  descrivere attività, esiti e risposta complessiva.
+- `AgenteOrchestratore`: valida il JSON del planner, esegue task indipendenti
+  in un pool limitato e raccoglie i risultati nell'ordine originale. I worker
+  non condividono istanze o cronologie e sono limitati a strumenti in sola
+  lettura.
+- `OrchestrationError`: errore esplicito per piani invalidi e sintesi assente.
 
 #### `AI/providers.py`
 

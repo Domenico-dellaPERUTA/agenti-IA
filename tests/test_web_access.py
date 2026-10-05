@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 import agente as agente_module
 
-from AI import Agent, InternetAccess, LLMProvider, LLMResponse
+from AI import Agent, InternetAccess, LLMProvider, LLMResponse, ToolExecutionError
 from AI.core import ToolCall
 from AI.web import (
     MAX_PAGE_BYTES,
@@ -152,6 +152,68 @@ class WebAccessTests(TestCase):
             [("Useful Lite result", "https://example.org/article")],
         )
 
+    def test_search_falls_back_to_lite_after_http_error_from_main_layout(self):
+        lite_page = """
+        <a class="result-link" href="https://example.org/article">Useful Lite result</a>
+        <td class="result-snippet">Snippet from Lite</td>
+        """
+        with patch.object(
+            self.internet,
+            "_fetch_text",
+            side_effect=[
+                ToolExecutionError("HTTP 403"),
+                (lite_page, "text/html", ""),
+            ],
+        ) as fetch:
+            result = self.internet.web_search("public topic")
+
+        self.assertIn("Useful Lite result", result)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_unreadable_search_results_are_recoverable_and_agent_continues(self):
+        with tempfile.TemporaryDirectory() as directory:
+            provider = DummyProvider(
+                [
+                    LLMResponse(
+                        tool_calls=[
+                            ToolCall(
+                                name="web_search",
+                                arguments={"query": "public topic"},
+                            ),
+                            ToolCall(
+                                name="create_file",
+                                arguments={
+                                    "file_path": "ricerca.txt",
+                                    "content": "Nessun annuncio verificato tramite ricerca.\n",
+                                },
+                            ),
+                        ]
+                    ),
+                    LLMResponse(content="Ho creato il file segnalando il limite della ricerca."),
+                ]
+            )
+            agent = Agent(provider, sandbox=directory)
+            agent.add_tool(self.internet.web_search)
+            tool_results = []
+            agent.send("Cerca sul web e crea un file con i risultati")
+
+            with patch.object(
+                self.internet,
+                "_parse_search_results",
+                return_value=[],
+            ):
+                answer = agent.run(
+                    on_tool_result=lambda name, value: tool_results.append((name, value))
+                )
+
+            self.assertIn("non ha restituito risultati leggibili", tool_results[0][1])
+            self.assertEqual(tool_results[1][0], "create_file")
+            self.assertTrue((Path(directory) / "ricerca.txt").is_file())
+            self.assertEqual(
+                answer,
+                "Ho creato il file segnalando il limite della ricerca.",
+            )
+
     def test_search_refuses_personal_or_secret_queries(self):
         for query in (
             "contact ada@example.org",
@@ -263,6 +325,98 @@ class WebAccessTests(TestCase):
                 self.internet._fetch_text("https://example.org/")
 
         self.assertEqual(request.call_count, MAX_REDIRECTS + 1)
+
+    def test_http_status_failure_is_a_recoverable_tool_error(self):
+        with patch.object(
+            self.internet,
+            "_request_once",
+            return_value=(403, {}, b""),
+        ):
+            with self.assertRaisesRegex(ToolExecutionError, "HTTP 403"):
+                self.internet._fetch_text("https://example.org/")
+
+    def test_http_error_is_reported_to_model_and_remaining_tools_continue(self):
+        provider = DummyProvider(
+            [
+                LLMResponse(
+                    tool_calls=[
+                        ToolCall(name="read_webpage", arguments={"url": "https://blocked.example/"}),
+                        ToolCall(name="read_webpage", arguments={"url": "https://available.example/"}),
+                    ]
+                ),
+                LLMResponse(content="Ho proseguito con la seconda pagina."),
+            ]
+        )
+        agent = Agent(provider)
+
+        def read_page(url):
+            if "blocked" in url:
+                raise ToolExecutionError(
+                    "La richiesta web è fallita con stato HTTP 403; pagina non letta."
+                )
+            return "contenuto della pagina"
+
+        agent.add_tool(read_page, name="read_webpage")
+        tool_results = []
+        agent.send("Leggi le pagine")
+
+        result = agent.run(
+            on_tool_result=lambda name, value: tool_results.append((name, value))
+        )
+
+        self.assertEqual(result, "Ho proseguito con la seconda pagina.")
+        self.assertIn("HTTP 403", tool_results[0][1])
+        self.assertEqual(tool_results[1][1], "contenuto della pagina")
+        self.assertEqual(
+            [message["content"] for message in agent.messages if message["role"] == "tool"],
+            [tool_results[0][1], "contenuto della pagina"],
+        )
+
+    def test_http_403_does_not_prevent_requested_file_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            provider = DummyProvider(
+                [
+                    LLMResponse(
+                        tool_calls=[
+                            ToolCall(
+                                name="read_webpage",
+                                arguments={"url": "https://blocked.example/"},
+                            ),
+                            ToolCall(
+                                name="create_file",
+                                arguments={
+                                    "file_path": "annunci.txt",
+                                    "content": "Azienda: esempio\nRuolo: tecnico informatico\n",
+                                },
+                            ),
+                        ]
+                    ),
+                    LLMResponse(content="Ho creato il file usando le informazioni disponibili."),
+                ]
+            )
+            agent = Agent(provider, sandbox=directory)
+            internet = InternetAccess()
+            agent.add_tool(internet.read_webpage)
+            tool_results = []
+            agent.send("Leggi la pagina e crea il file richiesto")
+
+            with patch.object(
+                internet,
+                "_request_once",
+                return_value=(403, {}, b""),
+            ):
+                answer = agent.run(
+                    on_tool_result=lambda name, value: tool_results.append((name, value))
+                )
+
+            created_file = Path(directory) / "annunci.txt"
+            self.assertEqual(
+                created_file.read_text(encoding="utf-8"),
+                "Azienda: esempio\nRuolo: tecnico informatico\n",
+            )
+            self.assertIn("HTTP 403", tool_results[0][1])
+            self.assertEqual(tool_results[1][0], "create_file")
+            self.assertEqual(answer, "Ho creato il file usando le informazioni disponibili.")
 
     def test_search_redirect_links_only_unwrap_to_https(self):
         self.assertEqual(

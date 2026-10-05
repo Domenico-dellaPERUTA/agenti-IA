@@ -45,6 +45,25 @@ class AgentToolsTests(unittest.TestCase):
 
         self.assertIn("run_bash_script", enabled_agent.tools)
 
+    def test_tool_allowlist_preserves_only_allowed_tools(self):
+        allowed_agent = Agent(
+            DummyProvider(),
+            sandbox=self.sandbox,
+            script_approval=lambda _path, _script: False,
+            allowed_tools={"list_files", "read_webpage"},
+        )
+        allowed_agent.add_tool(lambda: "web", name="read_webpage")
+        allowed_agent.add_tool(lambda: "unsafe", name="write_webpage")
+
+        self.assertEqual(set(allowed_agent.tools), {"list_files", "read_webpage"})
+
+    def test_tool_restrictions_can_only_be_narrowed(self):
+        self.agent.restrict_tools({"list_files", "create_file"})
+        self.agent.restrict_tools({"create_file", "read_file_excerpt"})
+        self.agent.add_tool(lambda: None, name="read_file_excerpt")
+
+        self.assertEqual(set(self.agent.tools), {"create_file"})
+
     def test_lists_searches_and_reads_files(self):
         (self.sandbox / "note.txt").write_text(
             "Prima riga\nDa fare: inviare il report\nUltima riga", encoding="utf-8"

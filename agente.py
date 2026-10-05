@@ -7,12 +7,12 @@ interattivo che mostra il flusso completo senza Tkinter.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 import os
 from pathlib import Path
 import sys
 
-from AI import Agent, InternetAccess, LMStudioProvider
+from AI import Agent, AgenteOrchestratore, InternetAccess, LMStudioProvider
 
 
 # Prompt usato per popolare in modo utile l'editor GUI al primo avvio.
@@ -24,6 +24,8 @@ def crea_agente(
     *,
     script_approval: Callable[[str, str], bool] | None = None,
     script_output: Callable[[str], None] | None = None,
+    system_prompt: str | None = None,
+    allowed_tools: Iterable[str] | None = None,
 ) -> Agent:
     """Crea un agente preconfigurato con provider, sandbox e strumenti web.
 
@@ -33,6 +35,9 @@ def crea_agente(
         script_approval: Callback opzionale che autorizza ogni script dopo aver
             mostrato il codice all'utente. Se omessa, il tool non è disponibile.
         script_output: Callback opzionale per ricevere i log dello script.
+        system_prompt: Istruzioni specifiche da aggiungere al prompt di sicurezza.
+        allowed_tools: Nomi degli strumenti consentiti; ``None`` mantiene tutti
+            gli strumenti preesistenti.
 
     Returns:
         Agente configurato con strumenti file/web e fonti per le citazioni.
@@ -93,6 +98,8 @@ def crea_agente(
             " In questa modalità non è disponibile uno strumento di esecuzione "
             "script: non affermare di aver eseguito comandi."
         )
+    if system_prompt:
+        prompt_sistema += "\n\n" + system_prompt
 
     agent = Agent(
         provider,
@@ -100,12 +107,34 @@ def crea_agente(
         sandbox=sandbox,
         script_approval=script_approval,
         script_output=script_output,
+        allowed_tools=allowed_tools,
     )
     internet = InternetAccess()
     agent.add_tool(internet.web_search)
     agent.add_tool(internet.read_webpage)
     agent.add_source_provider(internet.sources)
     return agent
+
+
+def crea_orchestratore(
+    cartella_sandbox: str | os.PathLike[str] | None = None,
+    *,
+    script_approval: Callable[[str, str], bool] | None = None,
+    script_output: Callable[[str], None] | None = None,
+    max_workers: int = 2,
+    max_tasks: int = 5,
+) -> AgenteOrchestratore:
+    """Crea l'orchestratore usando la stessa configurazione degli agenti normali."""
+    return AgenteOrchestratore(
+        agent_factory=lambda system_prompt: crea_agente(
+            cartella_sandbox,
+            script_approval=script_approval,
+            script_output=script_output,
+            system_prompt=system_prompt,
+        ),
+        max_workers=max_workers,
+        max_tasks=max_tasks,
+    )
 
 
 def main() -> None:

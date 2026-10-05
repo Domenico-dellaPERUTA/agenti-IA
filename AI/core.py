@@ -21,7 +21,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 
@@ -100,6 +100,10 @@ class LLMProvider:
         raise NotImplementedError("Il provider deve implementare complete().")
 
 
+class ToolExecutionError(RuntimeError):
+    """Errore di uno strumento che l'agente può riportare al modello."""
+
+
 class Agent:
     """Gestisce la conversazione e l'esecuzione di tool del modello.
 
@@ -116,6 +120,7 @@ class Agent:
         system_prompt: Istruzioni iniziali opzionali inviate al modello.
         sandbox: Radice dei file accessibili agli strumenti di file.
         actions: Sostituzioni delle azioni standard, indicizzate per nome.
+        allowed_tools: Nomi degli strumenti da registrare, se specificati.
         script_approval: Callback che mostra il codice e restituisce il consenso.
         script_output: Callback che riceve in tempo reale l'output dello script.
 
@@ -139,6 +144,7 @@ class Agent:
         actions: Mapping[str, Callable[..., Any]] | None = None,
         script_approval: Callable[[str, str], bool] | None = None,
         script_output: Callable[[str], None] | None = None,
+        allowed_tools: Iterable[str] | None = None,
     ):
         """Inizializza stato, strumenti e limiti della sandbox dell'agente."""
         self.provider = provider
@@ -152,6 +158,9 @@ class Agent:
         self.sandbox = Path(sandbox).expanduser().resolve() if sandbox is not None else None
         self.script_approval = script_approval
         self.script_output = script_output
+        self._allowed_tools: frozenset[str] | None = None
+        if allowed_tools is not None:
+            self.restrict_tools(allowed_tools)
 
         if self.sandbox is not None and not self.sandbox.is_dir():
             raise ValueError(f"La cartella sandbox non esiste: {self.sandbox}")
@@ -204,7 +213,26 @@ class Agent:
         Se ``name`` è omesso si usa ``fn.__name__``. Registrare un nome già
         esistente sostituisce lo strumento precedente con quello nuovo.
         """
-        self.tools[name or fn.__name__] = fn
+        tool_name = name or fn.__name__
+        if self._allowed_tools is None or tool_name in self._allowed_tools:
+            self.tools[tool_name] = fn
+
+    def restrict_tools(self, allowed_tools: Iterable[str]) -> None:
+        """Limita gli strumenti registrati e quelli che potranno essere aggiunti.
+
+        Le restrizioni successive possono soltanto ridurre l'insieme consentito.
+        """
+        if isinstance(allowed_tools, (str, bytes)):
+            raise TypeError("La allowlist degli strumenti deve essere una raccolta di nomi.")
+        names = frozenset(allowed_tools)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("I nomi degli strumenti consentiti devono essere stringhe non vuote.")
+        if self._allowed_tools is not None:
+            names &= self._allowed_tools
+        self._allowed_tools = names
+        self.tools = {
+            name: tool for name, tool in self.tools.items() if name in names
+        }
 
     def add_source_provider(
         self, provider: Callable[[], list[tuple[str, str]]]
@@ -655,6 +683,8 @@ class Agent:
                         f"Errore: {error}. Il file esiste già e non è stato "
                         "sovrascritto. Scegli un percorso diverso e riprova."
                     )
+                except ToolExecutionError as error:
+                    risultato = f"Errore dello strumento: {error}"
 
                 if on_tool_result is not None:
                     on_tool_result(call.name, risultato)

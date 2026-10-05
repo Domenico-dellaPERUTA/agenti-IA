@@ -18,6 +18,8 @@ import socket
 import ssl
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlsplit, urlunsplit
 
+from .core import ToolExecutionError
+
 
 # Endpoint e limiti centralizzati: rendono esplicite le risorse massime che
 # una singola istanza può consumare durante una ricerca o lettura.
@@ -264,18 +266,31 @@ class InternetAccess:
         Le fonti trovate restano registrate per la citazione nella risposta.
         """
         query = self._validate_query(query)
-        results = self._parse_search_results(
-            f"{SEARCH_URL}?q={quote_plus(query)}"
-        )
-        if not results:
-            results = self._parse_search_results(
-                f"{LITE_SEARCH_URL}?q={quote_plus(query)}"
-            )
+        results: list[WebSource] = []
+        failures: list[str] = []
+        for search_url in (SEARCH_URL, LITE_SEARCH_URL):
+            try:
+                results = self._parse_search_results(
+                    f"{search_url}?q={quote_plus(query)}"
+                )
+            except ToolExecutionError as error:
+                failures.append(str(error))
+                continue
+            if results:
+                break
 
         if not results:
-            raise RuntimeError(
-                "La ricerca non ha restituito risultati leggibili. "
-                "Il motore potrebbe aver cambiato formato o temporaneamente limitato le richieste."
+            detail = (
+                " Dettagli: " + " | ".join(failures)
+                if failures
+                else " Entrambi i layout sono stati consultati, ma non contenevano "
+                "risultati riconoscibili."
+            )
+            raise ToolExecutionError(
+                "La ricerca non ha restituito risultati leggibili."
+                f"{detail} Prova una query più specifica o parole chiave alternative; "
+                "non inventare aziende o annunci e continua con le altre fonti "
+                "disponibili."
             )
 
         for source in results:
@@ -386,7 +401,11 @@ class InternetAccess:
                 current_url = urljoin(current_url, location)
                 continue
             if status < 200 or status >= 300:
-                raise RuntimeError(f"La richiesta web è fallita con stato HTTP {status}.")
+                raise ToolExecutionError(
+                    f"La richiesta web è fallita con stato HTTP {status}; "
+                    "questa pagina non è stata letta. Prosegui con le altre fonti "
+                    "disponibili e segnala il limite se necessario."
+                )
 
             message = Message()
             message["content-type"] = headers.get("content-type", "")
