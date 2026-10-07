@@ -52,7 +52,7 @@ def crea_agente(
     if not sandbox.is_dir():
         raise ValueError(f"La cartella sandbox non esiste: {sandbox}")
 
-    provider = LMStudioProvider(model="qwen3-4b-2507")  # OllamaProvider(model="qwen3:4b")
+    provider = LMStudioProvider(model="ornith-1.5-9b-uncensored")  # OllamaProvider(model="qwen3:4b")
     prompt_sistema = (
         "Sei un assistente utile. Usa gli strumenti disponibili per lavorare "
         "solo sui file della sandbox e per cercare informazioni sul web. "

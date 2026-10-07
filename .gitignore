@@ -5,3 +5,4 @@ AI/__pycache__/*.pyc
 sandbox/
 sandbox/*
 
+doc/*.jsuml

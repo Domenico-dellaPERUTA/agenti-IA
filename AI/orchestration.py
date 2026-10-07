@@ -11,7 +11,10 @@ from typing import Literal
 
 from .core import Agent, LLMResponse
 
+# "direct" = esecuzione diretta, "parallel" = task indipendenti
 Mode = Literal["direct", "parallel"]
+
+# "completed" = task completato, "failed" = task fallito, "cancelled" = task annullato
 TaskStatus = Literal["completed", "failed", "cancelled"]
 
 READ_ONLY_TOOLS = frozenset(
@@ -105,6 +108,8 @@ class OrchestrationResult:
 
 @dataclass(frozen=True)
 class _Plan:
+    """Piano validato: modalità d'esecuzione e task indipendenti da avviare."""
+
     mode: Mode
     tasks: list[TaskSpec]
 
@@ -127,6 +132,13 @@ class AgenteOrchestratore:
         max_workers: int = 2,
         max_tasks: int = 5,
     ) -> None:
+        """Configura factory degli agenti e limiti di concorrenza e pianificazione.
+
+        Args:
+            agent_factory: Crea un agente nuovo dato il relativo prompt di sistema.
+            max_workers: Numero massimo di task eseguiti contemporaneamente.
+            max_tasks: Numero massimo di task accettati dal piano.
+        """
         if not callable(agent_factory):
             raise TypeError("agent_factory deve essere una funzione.")
         if isinstance(max_workers, bool) or not isinstance(max_workers, int):
@@ -165,6 +177,8 @@ class AgenteOrchestratore:
         if plan.mode == "direct":
             requires_file_creation = _requires_file_creation(request)
             if requires_file_creation and _requires_web_research(request):
+                # Per richieste composte, il writer riceve soltanto l'output
+                # concluso del ricercatore e non può avviare ricerche proprie.
                 research_output = self._research_for_file(request.strip(), on_event)
                 file_answer = self._create_file_from_results(
                     request.strip(),
@@ -185,6 +199,7 @@ class AgenteOrchestratore:
                 created_files: list[str] = []
 
                 def report_response(response: LLMResponse) -> None:
+                    """Nasconde testo prematuro se la richiesta richiede un file."""
                     if not requires_file_creation or created_files:
                         self._emit_response(
                             on_event,
@@ -203,6 +218,7 @@ class AgenteOrchestratore:
                             )
 
                 def report_tool_result(name: str, result: str) -> None:
+                    """Registra il percorso solo se create_file conferma il successo."""
                     if name == "create_file" and result.startswith("Creato: "):
                         created_files.append(result.removeprefix("Creato: ").strip())
                     self._emit(
@@ -290,6 +306,8 @@ class AgenteOrchestratore:
             if _requires_file_creation(request) and _requires_web_research(request)
             else READ_ONLY_TOOLS
         )
+        # Le future vengono tutte inviate al pool; max_workers limita quante
+        # attività possono essere effettivamente simultanee.
         with ThreadPoolExecutor(
             max_workers=self.max_workers,
             thread_name_prefix="agente-worker",
@@ -302,6 +320,7 @@ class AgenteOrchestratore:
                 task = futures[future]
                 results_by_id[task.id] = future.result()
 
+        # Ripristina l'ordine del piano, non quello casuale di completamento.
         results = [results_by_id[task.id] for task in plan.tasks]
         successful = [result for result in results if result.status == "completed"]
         if not successful:
@@ -328,6 +347,7 @@ class AgenteOrchestratore:
 
     @staticmethod
     def _serialize_task_results(results: list[TaskResult]) -> str:
+        """Serializza risultati ed errori in JSON da passare agli agenti successivi."""
         return json.dumps(
             [
                 {
@@ -453,6 +473,7 @@ class AgenteOrchestratore:
             )
 
             def report_tool_result(name: str, result: str) -> None:
+                """Conferma la creazione solo per l'esito positivo canonico del tool."""
                 if name == "create_file" and result.startswith("Creato: "):
                     created_files.append(result.removeprefix("Creato: ").strip())
                 self._emit(
@@ -465,6 +486,7 @@ class AgenteOrchestratore:
                 )
 
             def report_response(response: LLMResponse) -> None:
+                """Mostra le chiamate del writer senza accettarne testo come prova."""
                 for call in response.tool_calls:
                     self._emit(
                         on_event,
@@ -580,6 +602,7 @@ class AgenteOrchestratore:
         return plan
 
     def _validate_plan(self, raw_plan: object) -> _Plan:
+        """Valida struttura, limiti e campi dei task prima di avviare worker."""
         if not isinstance(raw_plan, dict) or set(raw_plan) != {"mode", "tasks"}:
             raise OrchestrationError(
                 "Il piano deve contenere esattamente i campi 'mode' e 'tasks'."
@@ -640,6 +663,7 @@ class AgenteOrchestratore:
     def _required_text(
         task: dict[str, object], key: str, index: int, max_length: int
     ) -> str:
+        """Estrae un campo testuale obbligatorio rispettandone la lunghezza massima."""
         value = task.get(key)
         if (
             not isinstance(value, str)
@@ -658,6 +682,11 @@ class AgenteOrchestratore:
         on_event: Callable[[dict[str, str]], None] | None,
         allowed_tools: frozenset[str] = READ_ONLY_TOOLS,
     ) -> TaskResult:
+        """Esegue un task con agente isolato e restituisce sempre il suo esito.
+
+        Gli errori del singolo worker diventano un ``TaskResult`` fallito, così
+        gli altri task possono terminare e la sintesi può descrivere il fallimento.
+        """
         self._emit(
             on_event,
             "task_started",
@@ -727,6 +756,7 @@ class AgenteOrchestratore:
         results: list[TaskResult],
         on_event: Callable[[dict[str, str]], None] | None,
     ) -> str:
+        """Produce una risposta dai risultati riusciti e segnala i task falliti."""
         self._emit(
             on_event,
             "agent_started",
@@ -795,6 +825,7 @@ class AgenteOrchestratore:
         title: str = "",
         agent_id: str = "",
     ) -> None:
+        """Traduce una risposta del modello in eventi UI senza eseguire i tool."""
         if response.content:
             AgenteOrchestratore._emit(
                 on_event,
@@ -820,6 +851,7 @@ class AgenteOrchestratore:
         event_type: str,
         **details: str,
     ) -> None:
+        """Invia un evento tipizzato alla GUI/CLI se è stato registrato un callback."""
         if on_event is not None:
             event = {"type": event_type}
             event.update(details)

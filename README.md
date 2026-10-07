@@ -438,6 +438,10 @@ risposte di rete e del modello sono simulate nei test.
 - `LMStudioProvider`: specializzazione di `OpenAIProvider` preconfigurata
   sull'endpoint locale di LM Studio.
 
+
+
+![diagramma delle classi](doc/diagram_class.png)
+
 #### `AI/web.py`
 
 - `WebSource`: rappresenta titolo, URL e snippet di un risultato.
@@ -463,17 +467,5 @@ risposte di rete e del modello sono simulate nei test.
 - `DummyProvider` e `WebAccessTests` in `tests/test_web_access.py`: provider
   simulato e test dell'accesso web e del relativo comportamento nell'agente.
 
-## Risoluzione dei problemi
 
-- **Impossibile raggiungere il provider**: controllare che LM Studio/Ollama
-  sia avviato, che il modello sia caricato e che endpoint e nome modello
-  coincidano con quelli configurati.
-- **`No module named 'openai'`**: attivare l'ambiente virtuale corretto e
-  installare `python -m pip install -r requirements.txt`.
-- **Tkinter non disponibile**: installare/abilitare Tkinter per la stessa
-  versione di Python selezionata in VS Code o nel terminale; verificare con
-  il comando riportato nei [requisiti](#requisiti). La CLI resta utilizzabile
-  senza Tkinter.
-- **Errore di connessione web**: verificare accesso DNS/HTTPS a Internet;
-  il progetto accetta solo contenuti HTML pubblici in HTTPS e può rifiutare
-  siti che limitano le richieste automatiche.
+
