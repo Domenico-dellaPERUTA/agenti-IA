@@ -9,8 +9,16 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import urlsplit
 
 import agente as agente_module
+import AI.application as application_module
 
-from AI import Agent, InternetAccess, LLMProvider, LLMResponse, ToolExecutionError
+from AI import (
+    Agent,
+    AgentApplication,
+    InternetAccess,
+    LLMProvider,
+    LLMResponse,
+    ToolExecutionError,
+)
 from AI.core import ToolCall
 from AI.web import (
     MAX_PAGE_BYTES,
@@ -490,11 +498,11 @@ class WebAccessTests(TestCase):
 
     def test_application_agent_registers_web_tools_with_sandbox_tools(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            agente_module,
+            application_module,
             "LMStudioProvider",
             return_value=DummyProvider([]),
         ):
-            agent = agente_module.crea_agente(Path(directory))
+            agent = AgentApplication(Path(directory)).create_agent()
 
         self.assertIn("web_search", agent.tools)
         self.assertIn("read_webpage", agent.tools)
@@ -507,12 +515,11 @@ class WebAccessTests(TestCase):
         approval = lambda _path, _script: False
         provider = DummyProvider([])
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            agente_module,
+            application_module,
             "LMStudioProvider",
             return_value=provider,
         ):
-            agent = agente_module.crea_agente(
-                Path(directory),
+            agent = AgentApplication(Path(directory)).create_agent(
                 script_approval=approval,
             )
 
@@ -526,11 +533,11 @@ class WebAccessTests(TestCase):
     def test_cli_prompt_does_not_claim_script_execution_is_available(self):
         provider = DummyProvider([])
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            agente_module,
+            application_module,
             "LMStudioProvider",
             return_value=provider,
         ):
-            agent = agente_module.crea_agente(Path(directory))
+            agent = AgentApplication(Path(directory)).create_agent()
 
         self.assertNotIn("run_bash_script", agent.tools)
         self.assertIn("non è disponibile uno strumento di esecuzione script", agent.messages[0]["content"])
@@ -555,6 +562,7 @@ class WebAccessTests(TestCase):
     def test_cli_main_enables_script_execution_and_streams_logs(self):
         provider = DummyProvider(
             [
+                LLMResponse(content='{"mode":"direct","tasks":[]}'),
                 LLMResponse(
                     tool_calls=[
                         ToolCall(
@@ -568,7 +576,7 @@ class WebAccessTests(TestCase):
         )
         displayed = StringIO()
         with (
-            patch.object(agente_module, "LMStudioProvider", return_value=provider),
+            patch.object(application_module, "LMStudioProvider", return_value=provider),
             patch("builtins.input", side_effect=["Scansiona localhost", "ESEGUI"]),
             redirect_stdout(displayed),
         ):
@@ -576,28 +584,22 @@ class WebAccessTests(TestCase):
 
         self.assertIn("printf 'cli output\\n'", displayed.getvalue())
         self.assertIn("cli output", displayed.getvalue())
-        self.assertIn("Agente · run_bash_script", displayed.getvalue())
+        self.assertIn("Agente diretto · run_bash_script", displayed.getvalue())
         self.assertIn("Scansione completata.", displayed.getvalue())
         self.assertIn("💬 ", displayed.getvalue())
         self.assertIn("⚙️ ", displayed.getvalue())
 
     def test_cli_main_uses_timestamped_agent_blocks_without_duplicate_final_answer(self):
-        provider = DummyProvider([LLMResponse(content="Risposta di prova.")])
+        provider = DummyProvider(
+            [
+                LLMResponse(content='{"mode":"direct","tasks":[]}'),
+                LLMResponse(content="Risposta di prova."),
+            ]
+        )
         displayed = StringIO()
         with (
-            tempfile.TemporaryDirectory() as directory,
-            patch.object(agente_module, "LMStudioProvider", return_value=provider),
+            patch.object(application_module, "LMStudioProvider", return_value=provider),
             patch("builtins.input", side_effect=["Richiesta di prova", ""]),
-            patch.object(
-                agente_module,
-                "crea_agente",
-                wraps=lambda *args, **kwargs: agente_module.Agent(
-                    provider,
-                    sandbox=directory,
-                    script_approval=kwargs.get("script_approval"),
-                    script_output=kwargs.get("script_output"),
-                ),
-            ),
             redirect_stdout(displayed),
         ):
             agente_module.main()
@@ -613,6 +615,8 @@ class WebAccessTests(TestCase):
             r"⚙️ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · Risultato finale\n"
             r"   Risposta di prova\.",
         )
+        self.assertIn("Pianificatore", output)
+        self.assertIn("Esecuzione diretta", output)
         self.assertEqual(output.count("Risposta di prova."), 1)
 
     def test_tool_schema_exposes_no_write_or_http_mutation_tool(self):

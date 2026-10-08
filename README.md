@@ -51,7 +51,7 @@ print(agent.run())
 
 ### Orchestratore multiagente
 
-La GUI usa un agente coordinatore che sceglie tra esecuzione diretta e
+GUI e CLI usano un agente coordinatore che sceglie tra esecuzione diretta e
 decomposizione in attività indipendenti. I worker hanno cronologie separate,
 sono avviati con concorrenza limitata e ricevono solo strumenti di lettura;
 un agente distinto sintetizza i risultati e segnala le attività non riuscite.
@@ -78,24 +78,28 @@ Le richieste che richiedono modifiche a file, script o una singola azione
 passano invece al normale agente, che conserva le conferme esplicite già
 previste dall'applicazione.
 
-L'orchestratore si può usare anche senza GUI:
+La classe `AgentApplication` in `AI/application.py` centralizza la
+configurazione condivisa e crea agenti o orchestratori. GUI e CLI le passano
+solo personalizzazioni come sandbox, callback per gli script e limiti di
+concorrenza. L'orchestratore si può usare anche senza GUI:
 
 ```python
-from agente import crea_orchestratore
+from AI import AgentApplication
 
-orchestratore = crea_orchestratore("./sandbox", max_workers=2)
-risultato = orchestratore.run(
+app = AgentApplication("./sandbox")
+orchestrator = app.create_orchestrator(max_workers=2)
+result = orchestrator.run(
     "Confronta le date, i costi e i rischi descritti nei documenti."
 )
-print(risultato.answer)
-for task in risultato.tasks:
+print(result.answer)
+for task in result.tasks:
     print(task.task_id, task.status, task.error or "")
 ```
 
 `max_workers` è compreso tra 1 e 4; il numero di task pianificati è limitato a
 5. La concorrenza effettiva dipende dal runtime locale e dalle risorse
-disponibili, quindi più worker non garantiscono risposte più rapide. La GUI
-continua ad accettare una sola richiesta utente alla volta: il parallelismo
+disponibili, quindi più worker non garantiscono risposte più rapide. Entrambe
+le interfacce accettano una sola richiesta utente alla volta: il parallelismo
 riguarda i worker della singola richiesta, non conversazioni persistenti.
 
 Il codice commentato di `AI/core.py`, `AI/providers.py` e `AI/web.py` descrive
@@ -209,7 +213,7 @@ interprete. Per esempio, su macOS/Linux:
 2. Caricare il modello e avviare il server API locale di LM Studio, normalmente
    all'indirizzo `http://localhost:1234/v1`.
 3. Se il nome del modello caricato o l'indirizzo del server sono diversi,
-   aggiornare la configurazione in `agente.py`, nella funzione `crea_agente`:
+   aggiornare il valore `DEFAULT_MODEL` in `AI/application.py`:
 
    ```python
    provider = LMStudioProvider(
@@ -353,19 +357,20 @@ risposte di rete e del modello sono simulate nei test.
 ### File del progetto
 
 - [`agente.py`](./agente.py): punto d'ingresso CLI; contiene
-  `PROMPT_INIZIALE`, `crea_agente(...)` per configurare modello, sandbox e
-  strumenti web, e `main()`.
+  `main()`, che configura l'applicazione tramite `AI.AgentApplication`.
 - [`agente_gui.py`](./agente_gui.py): punto d'ingresso GUI Tkinter; contiene la
-  classe `AgenteGUI`, che costruisce la finestra, avvia l'agente in un thread
+  classe `AgentGUI`, che costruisce la finestra, avvia l'agente in un thread
   e mostra risposte, azioni ed errori.
 - [`requirements.txt`](./requirements.txt): dipendenze Python richieste dal
   provider configurato (`openai`).
 - [`AI/__init__.py`](./AI/__init__.py): espone le classi pubbliche del package
-  (`Agent`, `AgenteOrchestratore`, i modelli di risultato, `InternetAccess`,
+  (`Agent`, `AgentOrchestrator`, i modelli di risultato, `InternetAccess`,
   `LLMProvider`, `LLMResponse`, `ToolCall` e i provider).
 - [`AI/core.py`](./AI/core.py): logica di conversazione e strumenti sandbox.
 - [`AI/orchestration.py`](./AI/orchestration.py): modelli dei task, validazione
   del piano e coordinamento limitato di pianificatore, worker e sintetizzatore.
+- [`AI/application.py`](./AI/application.py): configurazione condivisa e
+  factory `AgentApplication` per gli agenti e l'orchestratore applicativo.
 - [`AI/providers.py`](./AI/providers.py): adattatori per i diversi servizi
   linguistici.
 - [`AI/web.py`](./AI/web.py): ricerca e lettura web in sola lettura.
@@ -400,6 +405,8 @@ risposte di rete e del modello sono simulate nei test.
 
 ### Classi e componenti Python
 
+![diagramma delle package](doc/diagram_package.png)
+
 #### `AI/core.py`
 
 - `ToolCall`: nome e argomenti di una funzione richiesta dal modello.
@@ -423,7 +430,7 @@ risposte di rete e del modello sono simulate nei test.
 
 - `TaskSpec`, `TaskResult` e `OrchestrationResult`: dati immutabili per
   descrivere attività, esiti e risposta complessiva.
-- `AgenteOrchestratore`: valida il JSON del planner, esegue task indipendenti
+- `AgentOrchestrator`: valida il JSON del planner, esegue task indipendenti
   in un pool limitato e raccoglie i risultati nell'ordine originale. I worker
   non condividono istanze o cronologie e sono limitati a strumenti in sola
   lettura.
@@ -440,7 +447,6 @@ risposte di rete e del modello sono simulate nei test.
 
 
 
-![diagramma delle classi](doc/diagram_class.png)
 
 #### `AI/web.py`
 
@@ -458,14 +464,13 @@ risposte di rete e del modello sono simulate nei test.
   `_unwrap_search_url(...)`: funzioni interne per rilevare dati sensibili,
   sanificare testo e validare/estrarre URL dai risultati.
 
+![diagramma delle classi](doc/diagram_class.png)
+
 #### `agente_gui.py` e test
 
-- `AgenteGUI`: interfaccia grafica; metodi interni costruiscono i controlli,
+- `AgentGUI`: interfaccia grafica; metodi interni costruiscono i controlli,
   validano l'input, avviano l'agente e aggiornano la finestra in modo sicuro.
 - `DummyProvider` e `AgentToolsTests` in `tests/test_agent_tools.py`:
   provider simulato e test degli strumenti dell'agente.
 - `DummyProvider` e `WebAccessTests` in `tests/test_web_access.py`: provider
   simulato e test dell'accesso web e del relativo comportamento nell'agente.
-
-
-

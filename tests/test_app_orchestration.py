@@ -3,8 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from AI import LLMProvider, LLMResponse
-from agente import crea_orchestratore
+from AI import AgentApplication, LLMProvider, LLMResponse
 
 
 class DummyProvider(LLMProvider):
@@ -29,12 +28,13 @@ class ApplicationOrchestrationTests(unittest.TestCase):
             sandbox = Path(directory)
             with (
                 patch(
-                    "agente.LMStudioProvider",
+                    "AI.application.LMStudioProvider",
                     side_effect=lambda **_kwargs: DummyProvider(),
                 ) as provider_factory,
-                patch("agente.InternetAccess", return_value=DummyInternet()),
+                patch("AI.application.InternetAccess", return_value=DummyInternet()),
             ):
-                orchestrator = crea_orchestratore(sandbox)
+                application = AgentApplication(sandbox)
+                orchestrator = application.create_orchestrator()
                 planner = orchestrator.agent_factory("prompt planner")
                 worker = orchestrator.agent_factory("prompt worker")
 

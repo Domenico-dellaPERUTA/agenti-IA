@@ -118,7 +118,7 @@ class OrchestrationError(ValueError):
     """Errore esplicito di pianificazione o di esecuzione generale."""
 
 
-class AgenteOrchestratore:
+class AgentOrchestrator:
     """Pianifica una richiesta e coordina agenti worker con contesti separati.
 
     ``agent_factory`` deve restituire una nuova istanza di ``Agent`` per ogni
@@ -827,7 +827,7 @@ class AgenteOrchestratore:
     ) -> None:
         """Traduce una risposta del modello in eventi UI senza eseguire i tool."""
         if response.content:
-            AgenteOrchestratore._emit(
+            AgentOrchestrator._emit(
                 on_event,
                 "model_response",
                 agent_id=agent_id,
@@ -836,7 +836,7 @@ class AgenteOrchestratore:
                 message=response.content,
             )
         for call in response.tool_calls:
-            AgenteOrchestratore._emit(
+            AgentOrchestrator._emit(
                 on_event,
                 "tool_selected",
                 agent_id=agent_id,

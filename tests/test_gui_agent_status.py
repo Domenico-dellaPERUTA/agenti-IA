@@ -1,7 +1,7 @@
 import re
 import unittest
 
-from agente_gui import AgenteGUI
+from agente_gui import AgentGUI
 
 
 class FakeTreeview:
@@ -31,7 +31,7 @@ class FakeTreeview:
 
 class GuiAgentStatusTests(unittest.TestCase):
     def setUp(self):
-        self.gui = AgenteGUI.__new__(AgenteGUI)
+        self.gui = AgentGUI.__new__(AgentGUI)
         self.gui.agent_list = FakeTreeview()
         self.gui.agent_rows = {}
         self.gui.output_lines = []

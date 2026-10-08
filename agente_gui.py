@@ -32,12 +32,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from AI import OrchestrationResult
-from agente import PROMPT_INIZIALE, crea_orchestratore
+from AI import AgentApplication, INITIAL_PROMPT, OrchestrationResult
 
 
 @dataclass
-class RichiestaApprovazioneScript:
+class ScriptApprovalRequest:
     """Scambia una richiesta di approvazione tra worker e thread Tkinter.
 
     Il worker attende ``completato``; il thread grafico imposta ``decisione``
@@ -50,7 +49,7 @@ class RichiestaApprovazioneScript:
     completato: threading.Event = field(default_factory=threading.Event)
 
 
-class AgenteGUI:
+class AgentGUI:
     """App demo per conversazioni, sandbox, approvazione script e log live."""
 
     def __init__(self, window: tk.Tk):
@@ -141,7 +140,7 @@ class AgenteGUI:
         )
         self.prompt = tk.Text(frame, height=8, wrap=tk.WORD)
         self.prompt.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(4, 8))
-        self.prompt.insert("1.0", PROMPT_INIZIALE)
+        self.prompt.insert("1.0", INITIAL_PROMPT)
         self.prompt.bind("<Control-Return>", self._avvia_da_tastiera)
 
         controls = ttk.Frame(frame)
@@ -257,8 +256,8 @@ class AgenteGUI:
     def _esegui_agente(self, cartella: Path, prompt: str) -> None:
         """Esegue l'orchestratore e trasferisce gli eventi alla coda Tk."""
         try:
-            orchestrator = crea_orchestratore(
-                cartella,
+            application = AgentApplication(cartella)
+            orchestrator = application.create_orchestrator(
                 script_approval=self._richiedi_approvazione_script,
                 script_output=lambda output: self.events.put(("output", output)),
             )
@@ -274,12 +273,12 @@ class AgenteGUI:
 
     def _richiedi_approvazione_script(self, file_path: str, script: str) -> bool:
         """Invia la richiesta di approvazione al thread Tk e attende la decisione."""
-        richiesta = RichiestaApprovazioneScript(file_path, script)
+        richiesta = ScriptApprovalRequest(file_path, script)
         self.events.put(("approvazione_script", richiesta))
         richiesta.completato.wait()
         return richiesta.decisione
 
-    def _mostra_dialog_script(self, richiesta: RichiestaApprovazioneScript) -> None:
+    def _mostra_dialog_script(self, richiesta: ScriptApprovalRequest) -> None:
         """Mostra codice non modificabile e termina con approva o annulla."""
         dialog = tk.Toplevel(self.window)
         dialog.title("Autorizza esecuzione script")
@@ -344,7 +343,7 @@ class AgenteGUI:
                         raise TypeError("Evento dell'orchestratore non valido.")
                     self._gestisci_evento_orchestratore(contenuto)
                 elif tipo == "approvazione_script":
-                    if not isinstance(contenuto, RichiestaApprovazioneScript):
+                    if not isinstance(contenuto, ScriptApprovalRequest):
                         raise TypeError("Richiesta di approvazione script non valida.")
                     self._mostra_dialog_script(contenuto)
                 elif tipo == "risultato":
@@ -535,5 +534,5 @@ class AgenteGUI:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    AgenteGUI(root)
+    AgentGUI(root)
     root.mainloop()

@@ -3,7 +3,7 @@ import threading
 import time
 import unittest
 
-from AI import AgenteOrchestratore, LLMResponse, OrchestrationError
+from AI import AgentOrchestrator, LLMResponse, OrchestrationError
 
 
 class FakeAgent:
@@ -111,7 +111,7 @@ class OrchestrationTests(unittest.TestCase):
             state["agents"].append(agent)
             return agent
 
-        return AgenteOrchestratore(factory, **kwargs), state
+        return AgentOrchestrator(factory, **kwargs), state
 
     @staticmethod
     def parallel_plan(*tasks):

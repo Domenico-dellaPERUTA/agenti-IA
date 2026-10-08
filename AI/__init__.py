@@ -6,7 +6,7 @@ Gli import qui raccolti permettono di costruire un agente con
 
 from .core import Agent, LLMProvider, LLMResponse, ToolCall, ToolExecutionError
 from .orchestration import (
-    AgenteOrchestratore,
+    AgentOrchestrator,
     OrchestrationError,
     OrchestrationResult,
     TaskResult,
@@ -14,11 +14,13 @@ from .orchestration import (
 )
 from .providers import LMStudioProvider, OllamaProvider, OpenAIProvider
 from .web import InternetAccess
+from .application import AgentApplication, INITIAL_PROMPT
 
 # ``__all__`` documenta i nomi supportati dall'importazione pubblica ``AI.*``.
 __all__ = [
     "Agent",
-    "AgenteOrchestratore",
+    "AgentOrchestrator",
+    "AgentApplication",
     "InternetAccess",
     "LLMProvider",
     "LLMResponse",
@@ -31,4 +33,5 @@ __all__ = [
     "OllamaProvider",
     "OpenAIProvider",
     "LMStudioProvider",
+    "INITIAL_PROMPT",
 ]
