@@ -78,15 +78,32 @@ Le richieste che richiedono modifiche a file, script o una singola azione
 passano invece al normale agente, che conserva le conferme esplicite già
 previste dall'applicazione.
 
-La classe `AgentApplication` in `AI/application.py` centralizza la
-configurazione condivisa e crea agenti o orchestratori. GUI e CLI le passano
-solo personalizzazioni come sandbox, callback per gli script e limiti di
-concorrenza. L'orchestratore si può usare anche senza GUI:
+La classe `AI` in `AI/application.py` crea agenti e orchestratori usando
+configurazione fornita dal chiamante: un'istanza di `LLMProvider`, il prompt
+iniziale e il prompt di sistema. Il provider (e quindi modello, endpoint e
+connessione) viene configurato dal chiamante. L'orchestratore si può usare
+anche senza GUI:
+
+Il diagramma UML delle classi è disponibile in
+[docs/diagramma-classi.md](./docs/diagramma-classi.md).
 
 ```python
-from AI import AgentApplication
+from AI import AI, LMStudioProvider
 
-app = AgentApplication("./sandbox")
+INITIAL_PROMPT = "Confronta le informazioni nei documenti."
+DEFAULT_MODEL = "nome-modello-esposto-dal-server"
+_BASE_SYSTEM_PROMPT = "Sei un assistente utile."
+provider = LMStudioProvider(
+    model=DEFAULT_MODEL,
+    base_url="http://localhost:1234/v1",
+)
+
+app = AI(
+    provider,
+    "./sandbox",
+    initial_prompt=INITIAL_PROMPT,
+    base_system_prompt=_BASE_SYSTEM_PROMPT,
+)
 orchestrator = app.create_orchestrator(max_workers=2)
 result = orchestrator.run(
     "Confronta le date, i costi e i rischi descritti nei documenti."
@@ -213,7 +230,7 @@ interprete. Per esempio, su macOS/Linux:
 2. Caricare il modello e avviare il server API locale di LM Studio, normalmente
    all'indirizzo `http://localhost:1234/v1`.
 3. Se il nome del modello caricato o l'indirizzo del server sono diversi,
-   aggiornare il valore `DEFAULT_MODEL` in `AI/application.py`:
+   passare il nome del modello desiderato al costruttore `AI`:
 
    ```python
    provider = LMStudioProvider(
@@ -357,7 +374,7 @@ risposte di rete e del modello sono simulate nei test.
 ### File del progetto
 
 - [`agente.py`](./agente.py): punto d'ingresso CLI; contiene
-  `main()`, che configura l'applicazione tramite `AI.AgentApplication`.
+  `main()`, che configura la factory `AI` con le impostazioni della CLI.
 - [`agente_gui.py`](./agente_gui.py): punto d'ingresso GUI Tkinter; contiene la
   classe `AgentGUI`, che costruisce la finestra, avvia l'agente in un thread
   e mostra risposte, azioni ed errori.
@@ -369,8 +386,8 @@ risposte di rete e del modello sono simulate nei test.
 - [`AI/core.py`](./AI/core.py): logica di conversazione e strumenti sandbox.
 - [`AI/orchestration.py`](./AI/orchestration.py): modelli dei task, validazione
   del piano e coordinamento limitato di pianificatore, worker e sintetizzatore.
-- [`AI/application.py`](./AI/application.py): configurazione condivisa e
-  factory `AgentApplication` per gli agenti e l'orchestratore applicativo.
+- [`AI/application.py`](./AI/application.py): factory `AI`, parametrizzata
+  dai chiamanti, per agenti e orchestratore applicativo.
 - [`AI/providers.py`](./AI/providers.py): adattatori per i diversi servizi
   linguistici.
 - [`AI/web.py`](./AI/web.py): ricerca e lettura web in sola lettura.

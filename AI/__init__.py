@@ -14,13 +14,13 @@ from .orchestration import (
 )
 from .providers import LMStudioProvider, OllamaProvider, OpenAIProvider
 from .web import InternetAccess
-from .application import AgentApplication, INITIAL_PROMPT
+from .application import AI
 
 # ``__all__`` documenta i nomi supportati dall'importazione pubblica ``AI.*``.
 __all__ = [
     "Agent",
     "AgentOrchestrator",
-    "AgentApplication",
+    "AI",
     "InternetAccess",
     "LLMProvider",
     "LLMResponse",
@@ -33,5 +33,4 @@ __all__ = [
     "OllamaProvider",
     "OpenAIProvider",
     "LMStudioProvider",
-    "INITIAL_PROMPT",
 ]

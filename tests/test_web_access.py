@@ -9,11 +9,9 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import urlsplit
 
 import agente as agente_module
-import AI.application as application_module
-
 from AI import (
     Agent,
-    AgentApplication,
+    AI,
     InternetAccess,
     LLMProvider,
     LLMResponse,
@@ -35,6 +33,15 @@ class DummyProvider(LLMProvider):
 
     def complete(self, messages, tools=None):
         return next(self.responses)
+
+
+def make_application(sandbox, provider=None):
+    return AI(
+        provider or DummyProvider([]),
+        sandbox,
+        initial_prompt="test prompt",
+        base_system_prompt="Sei un assistente utile.",
+    )
 
 
 class WebAccessTests(TestCase):
@@ -497,12 +504,10 @@ class WebAccessTests(TestCase):
         self.assertEqual(agent.messages[-1]["content"], result)
 
     def test_application_agent_registers_web_tools_with_sandbox_tools(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(
-            application_module,
-            "LMStudioProvider",
-            return_value=DummyProvider([]),
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "AI.application.InternetAccess", return_value=self.internet
         ):
-            agent = AgentApplication(Path(directory)).create_agent()
+            agent = make_application(Path(directory)).create_agent()
 
         self.assertIn("web_search", agent.tools)
         self.assertIn("read_webpage", agent.tools)
@@ -514,12 +519,10 @@ class WebAccessTests(TestCase):
     def test_application_agent_exposes_script_runner_only_with_gui_approval(self):
         approval = lambda _path, _script: False
         provider = DummyProvider([])
-        with tempfile.TemporaryDirectory() as directory, patch.object(
-            application_module,
-            "LMStudioProvider",
-            return_value=provider,
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "AI.application.InternetAccess", return_value=self.internet
         ):
-            agent = AgentApplication(Path(directory)).create_agent(
+            agent = make_application(Path(directory), provider).create_agent(
                 script_approval=approval,
             )
 
@@ -532,12 +535,10 @@ class WebAccessTests(TestCase):
 
     def test_cli_prompt_does_not_claim_script_execution_is_available(self):
         provider = DummyProvider([])
-        with tempfile.TemporaryDirectory() as directory, patch.object(
-            application_module,
-            "LMStudioProvider",
-            return_value=provider,
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "AI.application.InternetAccess", return_value=self.internet
         ):
-            agent = AgentApplication(Path(directory)).create_agent()
+            agent = make_application(Path(directory), provider).create_agent()
 
         self.assertNotIn("run_bash_script", agent.tools)
         self.assertIn("non è disponibile uno strumento di esecuzione script", agent.messages[0]["content"])
