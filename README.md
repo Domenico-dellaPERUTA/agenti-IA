@@ -420,6 +420,8 @@ risposte di rete e del modello sono simulate nei test.
   bytecode Python generate dagli avvii e dai test. Non sono sorgenti né
   dipendenze; Python le rigenera quando necessario.
 
+![diagramma dei componenti](doc/diagram_component.png)
+
 ### Classi e componenti Python
 
 ![diagramma delle package](doc/diagram_package.png)
