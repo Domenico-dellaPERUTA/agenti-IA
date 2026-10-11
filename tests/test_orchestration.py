@@ -28,7 +28,7 @@ class FakeAgent:
     def send(self, message):
         self.messages.append({"role": "user", "content": message})
 
-    def run(self, on_response=None, on_tool_result=None):
+    def run(self, on_response=None, on_tool_result=None, on_status=None):
         if "pianificatore" in self.system_prompt:
             answer = self.state["plan"]
         elif "sintesi" in self.system_prompt:
@@ -124,6 +124,32 @@ class OrchestrationTests(unittest.TestCase):
             "title": title or task_id.title(),
             "instructions": instruction,
         }
+
+    def test_planner_extracts_json_from_markdown_and_extra_text(self):
+        orchestrator, _ = self.make_orchestrator(
+            '```json\n{"mode":"parallel","tasks":[{"id":"search","title":"Ricerca","instructions":"cerca informazioni"},{"id":"summarize","title":"Sintesi","instructions":"riassumi informazioni"}]}\n```\n\nHo preparato il piano.'
+        )
+        events = []
+
+        result = orchestrator.run("Cerca informazioni", on_event=events.append)
+
+        self.assertEqual(result.mode, "parallel")
+        self.assertEqual([item.task_id for item in result.tasks], ["search", "summarize"])
+
+    def test_invalid_planner_response_is_emitted_before_failure(self):
+        raw_response = "Non riesco a produrre il piano richiesto."
+        orchestrator, _ = self.make_orchestrator(raw_response)
+        events = []
+
+        with self.assertRaisesRegex(OrchestrationError, "JSON non valido"):
+            orchestrator.run("Analizza", on_event=events.append)
+
+        response_event = next(
+            event for event in events if event["type"] == "model_response"
+        )
+        self.assertEqual(response_event["agent_id"], "planner")
+        self.assertEqual(response_event["message"], raw_response)
+        self.assertEqual(events[-1]["type"], "agent_failed")
 
     def test_direct_plan_runs_one_normal_agent_without_workers(self):
         orchestrator, state = self.make_orchestrator('{"mode":"direct","tasks":[]}')

@@ -70,6 +70,7 @@ class AgentToolsTests(unittest.TestCase):
         )
 
         self.assertEqual(self.agent.list_files(), ["note.txt"])
+        self.assertEqual(self.agent.list_files("/"), ["note.txt"])
         self.assertEqual(
             self.agent.search_text("REPORT"),
             ["note.txt:2: Da fare: inviare il report"],
@@ -152,6 +153,56 @@ class AgentToolsTests(unittest.TestCase):
     def test_rejects_paths_outside_sandbox(self):
         with self.assertRaises(PermissionError):
             self.agent.read_file_excerpt("../outside.txt")
+
+    def test_root_slash_only_lists_sandbox_root(self):
+        (self.sandbox / "sandbox-only.txt").write_text("interno", encoding="utf-8")
+        result = self.agent.list_files("/")
+
+        self.assertEqual(result, ["sandbox-only.txt"])
+        self.assertNotIn("/", result)
+
+    def test_missing_file_error_is_returned_to_model_for_retry(self):
+        (self.sandbox / "note.txt").write_text("Contenuto corretto", encoding="utf-8")
+
+        class CorrectingProvider(LLMProvider):
+            def __init__(self):
+                self.responses = iter(
+                    [
+                        LLMResponse(
+                            tool_calls=[
+                                ToolCall(
+                                    name="read_file_excerpt",
+                                    arguments={"file_path": "notes.txt"},
+                                )
+                            ]
+                        ),
+                        LLMResponse(
+                            tool_calls=[
+                                ToolCall(
+                                    name="read_file_excerpt",
+                                    arguments={"file_path": "note.txt"},
+                                )
+                            ]
+                        ),
+                        LLMResponse(content="note.txt contiene: Contenuto corretto"),
+                    ]
+                )
+
+            def complete(self, messages, tools=None):
+                return next(self.responses)
+
+        results = []
+        agent = Agent(CorrectingProvider(), sandbox=self.sandbox)
+        agent.send("Leggi note.txt")
+
+        answer = agent.run(
+            on_tool_result=lambda name, result: results.append((name, result))
+        )
+
+        self.assertEqual(len(results), 2)
+        self.assertIn("Il file 'notes.txt' non esiste", results[0][1])
+        self.assertEqual(results[1][1], "1: Contenuto corretto")
+        self.assertEqual(answer, "note.txt contiene: Contenuto corretto")
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "Script execution as root is disabled")
     def test_runs_approved_script_and_streams_output(self):

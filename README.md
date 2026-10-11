@@ -31,6 +31,11 @@ Il progetto ha una base architetturale sana e riconoscibile:
 - La sandbox limita l’accesso ai file e rende il comportamento più controllato.
 - I provider web sono progettati per essere read-only e sicuri per una ricerca
   controllata su pagine pubbliche.
+- La GUI è stata potenziata con una timeline ad albero che mostra in tempo reale
+  l’esecuzione di planner, agenti, task e tool, con pannello di dettaglio per
+  input, output ed errori di ogni nodo. Ogni evento ricevuto viene conservato
+  come fase distinta sotto l'agente/task di riferimento, con payload originale
+  consultabile nel pannello di dettaglio.
 
 In sintesi, il progetto è già in grado di dimostrare un modello di agent
 robusto e interessante per uso di laboratorio e per prototipi funzionali.
@@ -40,10 +45,20 @@ robusto e interessante per uso di laboratorio e per prototipi funzionali.
 - Implementazione del core library con `Agent`, `ToolCall`, `LLMResponse` e
   provider astratto.
 - Gestione della sandbox per file e directory interne al progetto.
+- Per `list_files`, il percorso `/` indica la radice della sandbox e non la
+  radice del filesystem host; gli altri percorsi continuano a essere verificati
+  dal controllo di confinamento.
 - Supporto multi-provider: LM Studio, OpenAI e Ollama.
 - Supporto per ricerca web e lettura di documenti HTML pubblici.
 - Orchestrazione multi-agent con planner, worker, researcher e synthesize.
 - Demo CLI e GUI per mostrare l’integrazione del framework in applicazioni reali.
+- Nella timeline GUI i task e i tool sono collegati alle chiavi effettive dei
+  nodi planner/agente/task. Un riferimento padre Treeview inesistente può
+  interrompere il polling degli eventi e nascondere la risposta finale mentre
+  l'orchestrazione prosegue; il polling segnala ora gli errori di rendering e
+  continua a elaborare la coda. Il risultato finale viene inoltre registrato
+  nella timeline, così è distinguibile dagli eventi di risposta intermedi del
+  modello.
 
 ### Cose da fare
 
@@ -542,7 +557,9 @@ risposte di rete e del modello sono simulate nei test.
 - `AgentOrchestrator`: valida il JSON del planner, esegue task indipendenti
   in un pool limitato e raccoglie i risultati nell'ordine originale. I worker
   non condividono istanze o cronologie e sono limitati a strumenti in sola
-  lettura.
+  lettura. La risposta grezza del planner viene registrata nella timeline anche
+  se il JSON è invalido; in quel caso l'esecuzione si ferma esplicitamente,
+  senza avviare implicitamente la richiesta in modalità diretta.
 - `OrchestrationError`: errore esplicito per piani invalidi e sintesi assente.
 
 #### `AI/providers.py`
@@ -568,7 +585,10 @@ risposte di rete e del modello sono simulate nei test.
 - `InternetAccess`: espone `web_search(...)`, `read_webpage(...)` e
   `sources()`. Limita query, dimensione delle pagine, reindirizzamenti e
   richieste; rifiuta indirizzi non pubblici, protocolli diversi da HTTPS e
-  contenuti non HTML.
+  contenuti non HTML. Se il motore di ricerca restituisce una verifica
+  anti-automazione o un limite temporaneo, il tool solleva un errore terminale:
+  l'agente registra l'esito ma non lo rimanda al modello per tentare query
+  ripetute e consumare il budget.
 - `_contains_sensitive_data(...)`, `_sanitize_text(...)` e
   `_unwrap_search_url(...)`: funzioni interne per rilevare dati sensibili,
   sanificare testo e validare/estrarre URL dai risultati.

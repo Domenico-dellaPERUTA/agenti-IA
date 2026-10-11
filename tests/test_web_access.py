@@ -9,6 +9,9 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import urlsplit
 
 import agente as agente_module
+
+application_module = agente_module
+
 from AI import (
     Agent,
     AI,
@@ -194,12 +197,57 @@ class WebAccessTests(TestCase):
             self.internet,
             "_fetch_text",
             return_value=(challenge, "text/html", ""),
-        ):
+        ) as fetch:
             with self.assertRaisesRegex(
                 ToolExecutionError,
-                "verifica anti-automazione|limite temporaneo",
+                "verifica anti-automazione.*interrotta",
             ):
                 self.internet.web_search("programmatore Caserta")
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_agent_stops_after_web_search_challenge(self):
+        challenge = (
+            "<html><body>Please email the following code to: "
+            "error-lite@example.com Code: c21b</body></html>"
+        )
+
+        class SingleResponseProvider(LLMProvider):
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, messages, tools=None):
+                self.calls += 1
+                return LLMResponse(
+                    tool_calls=[
+                        ToolCall(name="web_search", arguments={"query": "public topic"})
+                    ]
+                )
+
+        provider = SingleResponseProvider()
+        agent = Agent(provider)
+        agent.add_tool(self.internet.web_search)
+        tool_results = []
+        agent.send("Cerca informazioni pubbliche")
+
+        with patch.object(
+            self.internet,
+            "_fetch_text",
+            return_value=(challenge, "text/html", ""),
+        ) as fetch:
+            with self.assertRaisesRegex(
+                ToolExecutionError,
+                "tentativi automatici ripetuti",
+            ):
+                agent.run(
+                    on_tool_result=lambda name, result: tool_results.append(
+                        (name, result)
+                    )
+                )
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(len(tool_results), 1)
+        self.assertIn("verifica anti-automazione", tool_results[0][1])
 
     def test_search_challenge_is_reported_instead_of_generic_empty_results(self):
         challenge = (

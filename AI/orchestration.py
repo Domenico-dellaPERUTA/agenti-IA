@@ -247,6 +247,15 @@ class AgentOrchestrator:
                 answer = agent.run(
                     on_response=report_response,
                     on_tool_result=report_tool_result,
+                    on_status=lambda status: self._emit(
+                        on_event,
+                        "agent_status",
+                        agent_id="direct",
+                        role="direct",
+                        title="Agente diretto",
+                        message=status.get("message", "Aggiornamento agente"),
+                        status=status.get("type", "update"),
+                    ),
                 )
                 if requires_file_creation and not created_files:
                     self._emit(
@@ -274,6 +283,15 @@ class AgentOrchestrator:
                     answer = agent.run(
                         on_response=report_response,
                         on_tool_result=report_tool_result,
+                        on_status=lambda status: self._emit(
+                            on_event,
+                            "agent_status",
+                            agent_id="direct",
+                            role="direct",
+                            title="Agente diretto",
+                            message=status.get("message", "Aggiornamento agente"),
+                            status=status.get("type", "update"),
+                        ),
                     )
                 if requires_file_creation and not created_files:
                     raise OrchestrationError(
@@ -545,6 +563,26 @@ class AgentOrchestrator:
         )
         return answer
 
+    @staticmethod
+    def _extract_json_object(text: str) -> str:
+        """Rimuove wrapper Markdown o testo extra e restituisce un oggetto JSON valido."""
+        stripped = text.strip()
+        if not stripped:
+            return stripped
+
+        if stripped.startswith("```"):
+            stripped = stripped.strip("`")
+            if stripped.lower().startswith("json"):
+                stripped = stripped[4:].strip()
+            if stripped.endswith("```"):
+                stripped = stripped[:-3].strip()
+
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if 0 <= start < end:
+            return stripped[start : end + 1]
+        return stripped
+
     def _create_plan(
         self,
         request: str,
@@ -562,15 +600,27 @@ class AgentOrchestrator:
             planner = self.agent_factory(_PLAN_PROMPT)
             planner.restrict_tools(frozenset())
             planner.send(request)
-            content = planner.run()
+            content = planner.run(
+                on_response=lambda response: self._emit_response(
+                    on_event,
+                    response,
+                    title="Pianificatore",
+                    agent_id="planner",
+                )
+            )
             if not isinstance(content, str) or not content.strip():
                 raise OrchestrationError("Il pianificatore non ha restituito un piano.")
+            candidate = self._extract_json_object(content)
             try:
-                raw_plan = json.loads(content)
+                raw_plan = json.loads(candidate)
             except json.JSONDecodeError as error:
                 raise OrchestrationError(
                     f"Il pianificatore ha restituito JSON non valido: {error.msg}."
                 ) from error
+            if isinstance(raw_plan, dict) and set(raw_plan) != {"mode", "tasks"}:
+                raise OrchestrationError(
+                    "Il pianificatore ha restituito JSON non valido: payload non conforme al piano."
+                )
             plan = self._validate_plan(raw_plan)
             if raw_plan.get("mode") == "direct" and raw_plan["tasks"]:
                 self._emit(
@@ -721,6 +771,15 @@ class AgentOrchestrator:
                     title=task.title,
                     tool_name=name,
                     message=f"{name}: {result}",
+                ),
+                on_status=lambda status: self._emit(
+                    on_event,
+                    "task_status",
+                    agent_id=f"task:{task.id}",
+                    task_id=task.id,
+                    title=task.title,
+                    message=status.get("message", "Aggiornamento task"),
+                    status=status.get("type", "update"),
                 ),
             )
             if not isinstance(output, str) or not output.strip():

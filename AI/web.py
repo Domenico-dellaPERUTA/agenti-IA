@@ -18,7 +18,7 @@ import socket
 import ssl
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlsplit, urlunsplit
 
-from .core import ToolExecutionError
+from .core import TerminalToolExecutionError, ToolExecutionError
 
 
 # Endpoint e limiti centralizzati: rendono esplicite le risorse massime che
@@ -273,6 +273,8 @@ class InternetAccess:
                 results = self._parse_search_results(
                     f"{search_url}?q={quote_plus(query)}"
                 )
+            except TerminalToolExecutionError:
+                raise
             except ToolExecutionError as error:
                 failures.append(str(error))
                 continue
@@ -319,10 +321,11 @@ class InternetAccess:
         parser.feed(body)
         parser.close()
         if not parser.results and _is_search_challenge(body):
-            raise ToolExecutionError(
+            raise TerminalToolExecutionError(
                 "Il motore di ricerca ha restituito una verifica anti-automazione "
-                "o un limite temporaneo, non risultati. Riprova più tardi o consulta "
-                "un'altra fonte autorizzata."
+                "o un limite temporaneo, non risultati. La ricerca viene interrotta "
+                "per evitare tentativi automatici ripetuti; riprova più tardi o "
+                "consulta un'altra fonte autorizzata."
             )
         results = []
         seen: set[str] = set()

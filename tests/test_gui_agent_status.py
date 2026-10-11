@@ -1,3 +1,5 @@
+import json
+import queue
 import re
 import unittest
 
@@ -9,10 +11,12 @@ class FakeTreeview:
         self.rows = {}
         self.next_id = 0
 
-    def insert(self, _parent, _index, *, values, tags):
+    def insert(self, parent, _index, *, values, tags):
+        if parent and parent not in self.rows:
+            raise ValueError(f"Parent Treeview inesistente: {parent}")
         self.next_id += 1
         item_id = f"item-{self.next_id}"
-        self.rows[item_id] = {"values": values, "tags": tags}
+        self.rows[item_id] = {"parent": parent, "values": values, "tags": tags}
         return item_id
 
     def item(self, item_id, option=None, **kwargs):
@@ -27,6 +31,30 @@ class FakeTreeview:
 
     def delete(self, item_id):
         del self.rows[item_id]
+
+
+class FakeWindow:
+    def __init__(self):
+        self.callbacks = []
+
+    def after(self, _delay, callback):
+        self.callbacks.append(callback)
+
+
+class FakeVariable:
+    def __init__(self):
+        self.value = ""
+
+    def set(self, value):
+        self.value = value
+
+
+class FakeButton:
+    def __init__(self):
+        self.state = None
+
+    def configure(self, **kwargs):
+        self.state = kwargs.get("state")
 
 
 class GuiAgentStatusTests(unittest.TestCase):
@@ -123,6 +151,182 @@ class GuiAgentStatusTests(unittest.TestCase):
         row_id = self.gui.agent_rows["task:lookup"]
         self.assertEqual(self.gui.agent_list.item(row_id, "tags"), ("failed",))
         self.assertEqual(self.gui.agent_list.item(row_id, "values")[2], "Errore: HTTP 403")
+
+    def test_parallel_task_is_attached_to_existing_planner_node(self):
+        root_id = self.gui._nuovo_nodo_esecuzione(
+            "execution-root",
+            parent_key=None,
+            node_type="request",
+            label="Richiesta",
+        )
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "agent_started",
+                "agent_id": "planner",
+                "title": "Pianificatore",
+            }
+        )
+        planner_id = self.gui.agent_rows["planner"]
+
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "task_started",
+                "task_id": "lookup",
+                "title": "Elenca file",
+                "message": "Avviato",
+            }
+        )
+
+        task_id = self.gui.agent_rows["task:lookup"]
+        self.assertEqual(self.gui.agent_list.item(planner_id)["parent"], root_id)
+        self.assertEqual(self.gui.agent_list.item(task_id)["parent"], planner_id)
+
+    def test_direct_tool_event_is_attached_to_direct_agent_node(self):
+        root_id = self.gui._nuovo_nodo_esecuzione(
+            "execution-root",
+            parent_key=None,
+            node_type="request",
+            label="Richiesta",
+        )
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "agent_started",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+            }
+        )
+        direct_id = self.gui.agent_rows["direct"]
+
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "tool_selected",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "message": "list_files({})",
+            }
+        )
+
+        tool_key = next(key for key in self.gui.agent_rows if key.startswith("tool:"))
+        tool_id = self.gui.agent_rows[tool_key]
+        self.assertEqual(self.gui.agent_list.item(direct_id)["parent"], root_id)
+        self.assertEqual(self.gui.agent_list.item(tool_id)["parent"], direct_id)
+
+    def test_model_response_does_not_mark_agent_complete_before_agent_completed(self):
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "agent_started",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+            }
+        )
+        agent_id = self.gui.agent_rows["direct"]
+
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "model_response",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "message": "Eseguirò gli strumenti richiesti.",
+            }
+        )
+
+        self.assertEqual(self.gui.agent_list.item(agent_id, "tags"), ("running",))
+
+    def test_timeline_keeps_each_agent_phase_as_a_separate_event(self):
+        events = (
+            {
+                "type": "agent_started",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+            },
+            {
+                "type": "agent_status",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "status": "llm_request",
+                "message": "Invio la richiesta",
+            },
+            {
+                "type": "model_response",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "message": "Chiamerò list_files",
+            },
+            {
+                "type": "tool_selected",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "message": "list_files({})",
+            },
+            {
+                "type": "tool_result",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "tool_name": "list_files",
+                "message": "notes.txt",
+            },
+            {
+                "type": "agent_completed",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+            },
+        )
+        for event in events:
+            self.gui._gestisci_evento_orchestratore(event)
+
+        phase_nodes = [
+            node
+            for key, node in self.gui.execution_nodes.items()
+            if key.startswith("event:")
+        ]
+        self.assertEqual(len(phase_nodes), len(events))
+        self.assertEqual(
+            [node.label.split(" · ")[1] for node in phase_nodes],
+            [event["type"] for event in events],
+        )
+        self.assertTrue(
+            all(node.parent_key == "direct" for node in phase_nodes)
+        )
+        llm_request = json.loads(phase_nodes[1].input_data.split("\n", 1)[1])
+        self.assertEqual(llm_request["status"], "llm_request")
+        self.assertEqual(phase_nodes[4].output_data, "notes.txt")
+
+    def test_final_result_from_worker_is_logged_and_added_to_timeline(self):
+        self.gui.events = queue.Queue()
+        self.gui.window = FakeWindow()
+        self.gui.stato = FakeVariable()
+        self.gui.pulsante_avvia = FakeButton()
+        self.gui.events.put(("risultato", "Risposta finale"))
+
+        self.gui._leggi_eventi()
+
+        self.assertIn("Risposta finale", "".join(self.gui.output_lines))
+        result_event = next(
+            node
+            for key, node in self.gui.execution_nodes.items()
+            if key.startswith("event:")
+        )
+        self.assertIn("orchestration_completed", result_event.label)
+        self.assertEqual(result_event.output_data, "Risposta finale")
+        self.assertEqual(self.gui.stato.value, "Completato")
+        self.assertEqual(self.gui.pulsante_avvia.state, "normal")
+        self.assertEqual(len(self.gui.window.callbacks), 1)
+
+    def test_gui_event_error_does_not_discard_later_final_result(self):
+        self.gui.events = queue.Queue()
+        self.gui.window = FakeWindow()
+        self.gui.stato = FakeVariable()
+        self.gui.pulsante_avvia = FakeButton()
+        self.gui.events.put(("orchestrator_event", "evento malformato"))
+        self.gui.events.put(("risultato", "Risposta recuperata"))
+
+        self.gui._leggi_eventi()
+
+        output = "".join(self.gui.output_lines)
+        self.assertIn("Errore GUI durante l'elaborazione", output)
+        self.assertIn("Risposta recuperata", output)
+        self.assertEqual(self.gui.stato.value, "Completato")
+        self.assertEqual(self.gui.pulsante_avvia.state, "normal")
 
     def test_clears_previous_request_rows(self):
         self.gui._imposta_stato_agente("planner", "Pianificatore", "completed")

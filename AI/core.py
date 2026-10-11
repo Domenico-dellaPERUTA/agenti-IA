@@ -104,6 +104,10 @@ class ToolExecutionError(RuntimeError):
     """Errore di uno strumento che l'agente può riportare al modello."""
 
 
+class TerminalToolExecutionError(ToolExecutionError):
+    """Errore che interrompe il ciclo quando riprovare non è utile o consentito."""
+
+
 class Agent:
     """Gestisce la conversazione e l'esecuzione di tool del modello.
 
@@ -276,10 +280,12 @@ class Agent:
     def list_files(self, directory: str = "") -> list[str]:
         """Elenca percorsi relativi dei file interni alla cartella richiesta.
 
+        La directory ``/`` indica la radice della sandbox, non quella del
+        filesystem host.
         I collegamenti simbolici che puntano fuori dalla sandbox vengono
         esclusi. Solleva ``NotADirectoryError`` se la cartella non esiste.
         """
-        folder = self._sandbox_path(directory)
+        folder = self._sandbox_path("" if directory == "/" else directory)
         if not folder.is_dir():
             raise NotADirectoryError(f"La cartella '{directory}' non esiste nella sandbox.")
         sandbox = self.sandbox
@@ -630,6 +636,7 @@ class Agent:
         self,
         on_response: Callable[[LLMResponse], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
+        on_status: Callable[[dict[str, str]], None] | None = None,
     ) -> str | None:
         """Interroga il modello e gestisce le chiamate agli strumenti finché termina.
 
@@ -647,7 +654,17 @@ class Agent:
             Testo conclusivo del modello con eventuali fonti, oppure ``None``.
         """
         while True:
+            if on_status is not None:
+                on_status({
+                    "type": "llm_request",
+                    "message": "Invio la richiesta al provider LLM",
+                })
             response = self.provider.complete(self.messages, list(self.tools.values()))
+            if on_status is not None:
+                on_status({
+                    "type": "llm_response",
+                    "message": "Risposta ricevuta dal provider LLM",
+                })
             if on_response is not None:
                 on_response(response)
 
@@ -674,6 +691,7 @@ class Agent:
                 if tool_fn is None:
                     raise ValueError(f"Tool non registrata: {call.name}")
 
+                terminal_error = None
                 try:
                     risultato = self._stringify_tool_result(
                         tool_fn(**call.arguments)
@@ -685,6 +703,10 @@ class Agent:
                     )
                 except ToolExecutionError as error:
                     risultato = f"Errore dello strumento: {error}"
+                    if isinstance(error, TerminalToolExecutionError):
+                        terminal_error = error
+                except (OSError, ValueError, TypeError) as error:
+                    risultato = f"Errore dello strumento: {error}"
 
                 if on_tool_result is not None:
                     on_tool_result(call.name, risultato)
@@ -693,3 +715,5 @@ class Agent:
                     "tool_name": call.name,
                     "content": risultato,
                 })
+                if terminal_error is not None:
+                    raise terminal_error
