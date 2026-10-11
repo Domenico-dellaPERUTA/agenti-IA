@@ -15,6 +15,97 @@ Per impostazione predefinita l'applicazione usa un modello servito localmente
 da **LM Studio**. Il progetto contiene anche provider compatibili con **Ollama**
 e con le API **OpenAI**.
 
+## Architettura e review continua
+
+Questa sezione rappresenta la memoria di progetto condivisa: va aggiornata a
+ogni modifica significativa del codice, della progettazione o delle scelte di
+sicurezza. È pensata sia per sviluppatori umani sia per sistemi AI che
+interagiscono con il repository.
+
+### Stato attuale
+
+Il progetto ha una base architetturale sana e riconoscibile:
+- `Agent` centralizza conversazione, tool calling e sandbox.
+- `LLMProvider` separa il protocollo del modello dal runtime dell’agente.
+- `AgentOrchestrator` introduce una logica di pianificazione e parallelismo.
+- La sandbox limita l’accesso ai file e rende il comportamento più controllato.
+- I provider web sono progettati per essere read-only e sicuri per una ricerca
+  controllata su pagine pubbliche.
+
+In sintesi, il progetto è già in grado di dimostrare un modello di agent
+robusto e interessante per uso di laboratorio e per prototipi funzionali.
+
+### Cose già fatte
+
+- Implementazione del core library con `Agent`, `ToolCall`, `LLMResponse` e
+  provider astratto.
+- Gestione della sandbox per file e directory interne al progetto.
+- Supporto multi-provider: LM Studio, OpenAI e Ollama.
+- Supporto per ricerca web e lettura di documenti HTML pubblici.
+- Orchestrazione multi-agent con planner, worker, researcher e synthesize.
+- Demo CLI e GUI per mostrare l’integrazione del framework in applicazioni reali.
+
+### Cose da fare
+
+1. Separare meglio i livelli di responsabilità:
+   - libreria core,
+   - policy applicativa,
+   - orchestrazione,
+   - demo UI/CLI,
+   - gestione sicurezza.
+2. Rafforzare la sicurezza della fase di esecuzione script: isolamento reale,
+   allowlist, timeout, audit e restrizioni di permessi.
+3. Migliorare la validazione dei parametri degli strumenti e del risultato delle
+   tool call prima di usarli per costruire la risposta finale.
+4. Correggere i test falliti e trasformare il test suite in una baseline stabile.
+5. Mantenere una documentazione di progetto sempre coerente con l’architettura
+   effettiva del codice.
+
+### Criticità principali
+
+- Sicurezza operativa: l’esecuzione di script Bash è potentissima e richiede
+  un controllo molto rigoroso; oggi si appoggia troppo alla policy implicita del
+  prompt e al consenso dell’utente.
+- Heuristica di routing: la scelta `direct` vs `parallel` e le rilevazioni di
+  file/web sono basate su regex e keyword, quindi possono essere fragili su casi
+  ambigui.
+- Schema dei tool: la conversione di funzioni in JSON schema è semplificata e
+  rischia di essere insufficiente per strumenti più complessi.
+- Boundary architetturale: demo, runtime, policy e accessi web sono ancora
+  mescolati in modo non perfettamente pulito.
+- Validazione del codice: il test suite mostra alcuni punti deboli che devono
+  essere risolti per ottenere una baseline affidabile.
+
+### Decisioni di design da preservare
+
+- Separa provider e runtime: i dettagli del modello non devono contaminare la
+  logica di orchestrazione.
+- Mantieni la sandbox come confine principale di accesso ai file.
+- Tratta le fonti web come dati esterni non attendibili: usale come supporto,
+  non come autorità assoluta.
+- Mantieni una forte distinzione tra:
+  - agent di esecuzione,
+  - agent di ricerca,
+  - agent di scrittura file,
+  - agente di sintesi.
+
+### Decisioni di design da rivedere
+
+- Ridurre la dipendenza da prompt “allargati” come unico meccanismo di sicurezza.
+- Passare da un modello essenzialmente prompt-driven a un modello
+  capability-driven e verificato.
+- Formalizzare meglio il contratto degli strumenti, evitando schemi troppo
+  generici o incompleti.
+- Separare la demo applicativa dal framework core in modo più netto.
+
+### Nota finale
+
+Questa sezione è il punto di riferimento per il progetto: se cambia il codice,
+la sicurezza, l’architettura o l’uso previsto delle feature, va aggiornata
+insieme a quel cambiamento. Questo mantiene il repository leggibile e coerente
+anche per future sessioni di lavoro AI e per sviluppatori che entrano nel
+progetto nel tempo.
+
 ## Uso come libreria Python
 
 La GUI e la CLI sono esempi d'applicazione: non sono necessarie per integrare
