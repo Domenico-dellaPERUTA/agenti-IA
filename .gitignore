@@ -5,7 +5,7 @@ AI/__pycache__/*.pyc
 sandbox/
 sandbox/*
 
-doc/*.jsuml
+docs/*.jsuml
 AI/__pycache__/__init__.cpython-311.pyc
 .DS_Store
 

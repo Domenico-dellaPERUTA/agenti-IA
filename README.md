@@ -511,11 +511,10 @@ risposte di rete e del modello sono simulate nei test.
   bytecode Python generate dagli avvii e dai test. Non sono sorgenti né
   dipendenze; Python le rigenera quando necessario.
 
-![diagramma dei componenti](doc/diagram_component.png)
+![diagramma dei componenti](docs/diagram_component.png)
 
 ### Classi e componenti Python
 
-![diagramma delle package](doc/diagram_package.png)
 
 #### `AI/core.py`
 
@@ -574,7 +573,10 @@ risposte di rete e del modello sono simulate nei test.
   `_unwrap_search_url(...)`: funzioni interne per rilevare dati sensibili,
   sanificare testo e validare/estrarre URL dai risultati.
 
-![diagramma delle classi](doc/diagram_class.png)
+![diagramma delle package](docs/diagram_package.png)
+
+
+![diagramma delle classi](docs/diagram_class.png)
 
 #### `agente_gui.py` e test
 
