@@ -59,6 +59,25 @@ robusto e interessante per uso di laboratorio e per prototipi funzionali.
   continua a elaborare la coda. Il risultato finale viene inoltre registrato
   nella timeline, così è distinguibile dagli eventi di risposta intermedi del
   modello.
+- Gestione dello stato agente nella GUI:
+  - Lo stato visivo di ogni agente/task nella timeline è affidato a un unico
+    metodo (`_imposta_stato_agente`), così `agent_started`, `agent_completed`,
+    `agent_failed` e `agent_retry` non sovrascrivono più il timestamp reale
+    dell'evento con una seconda scrittura.
+  - In caso di errore fatale dell'orchestratore, solo le righe di tipo
+    `agente` o `task` ancora in esecuzione sono marcate come errore: la radice
+    della richiesta, le fasi già registrate e gli strumenti conclusi restano
+    inalterati, così la timeline rimane leggibile.
+  - Gli eventi `agent_status` e `task_status` (per esempio `llm_request`,
+    `llm_response`) aggiornano il timestamp e l'output del nodo corrispondente
+    senza alterarne lo stato "in esecuzione", così l'utente vede quale fase
+    del lavoro sta avvenendo.
+  - `agent_retry` cambia l'etichetta della riga in "Nuovo tentativo" con un
+    colore distinto, così il retry esplicito è visibile anche senza aprire il
+    log.
+  - All'avvio di una nuova richiesta la coda degli eventi residui della run
+    precedente viene svuotata: evita che stati obsoleti si manifestino nella
+    timeline appena creata.
 
 ### Cose da fare
 

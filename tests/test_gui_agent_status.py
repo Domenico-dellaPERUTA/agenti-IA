@@ -336,6 +336,128 @@ class GuiAgentStatusTests(unittest.TestCase):
         self.assertEqual(self.gui.agent_rows, {})
         self.assertEqual(self.gui.agent_list.get_children(), ())
 
+    def test_pulisci_lista_agenti_discards_queued_events(self):
+        self.gui.events = queue.Queue()
+        self.gui.events.put(("orchestrator_event", {"type": "agent_started", "agent_id": "stale"}))
+        self.gui.events.put(("risultato", "Obsoleto"))
+
+        self.gui._pulisci_lista_agenti()
+
+        self.assertTrue(self.gui.events.empty())
+
+    def test_fatal_error_marks_only_agents_and_tasks_as_failed(self):
+        self.gui._pulisci_lista_agenti()
+        self.gui._gestisci_evento_orchestratore(
+            {"type": "agent_started", "agent_id": "planner", "title": "Pianificatore"}
+        )
+        self.gui._gestisci_evento_orchestratore(
+            {"type": "task_started", "task_id": "t1", "title": "Task 1"}
+        )
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "tool_selected",
+                "agent_id": "planner",
+                "title": "Pianificatore",
+                "message": "list_files({})",
+            }
+        )
+
+        self.gui._segna_agenti_in_corso_come_errore("interruzione")
+
+        nodes = self.gui.execution_nodes
+        # Root, fasi e tool NON devono essere trasformati in "agente" né marcati failed.
+        self.assertEqual(nodes["execution-root"].status, "running")
+        self.assertEqual(nodes["execution-root"].node_type, "request")
+        for key, node in nodes.items():
+            if key.startswith("event:") or key.startswith("tool:"):
+                self.assertEqual(node.status, "running", f"{key} non dovrebbe fallire")
+        # Solo agente e task in running devono essere marcati failed.
+        self.assertEqual(nodes["planner"].status, "failed")
+        self.assertEqual(nodes["planner"].node_type, "agente")
+        self.assertEqual(nodes["task:t1"].status, "failed")
+        self.assertEqual(nodes["task:t1"].node_type, "task")
+
+    def test_agent_status_updates_timestamp_without_changing_status(self):
+        self.gui._pulisci_lista_agenti()
+        self.gui._gestisci_evento_orchestratore(
+            {"type": "agent_started", "agent_id": "direct", "title": "Agente diretto"}
+        )
+        node = self.gui.execution_nodes["direct"]
+        previous_timestamp = node.timestamp
+
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "agent_status",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "status": "llm_request",
+                "message": "Invio la richiesta",
+            }
+        )
+
+        self.assertEqual(node.status, "running")
+        self.assertIn("llm_request", node.output_data)
+        self.assertGreaterEqual(node.timestamp, previous_timestamp)
+
+    def test_task_status_updates_task_node(self):
+        self.gui._pulisci_lista_agenti()
+        self.gui._gestisci_evento_orchestratore(
+            {"type": "task_started", "task_id": "abc", "title": "Ricerca"}
+        )
+
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "task_status",
+                "agent_id": "task:abc",
+                "task_id": "abc",
+                "title": "Ricerca",
+                "status": "llm_response",
+                "message": "Ricevuta risposta",
+            }
+        )
+
+        node = self.gui.execution_nodes["task:abc"]
+        self.assertEqual(node.status, "running")
+        self.assertIn("llm_response", node.output_data)
+
+    def test_agent_retry_marks_node_as_retry(self):
+        self.gui._pulisci_lista_agenti()
+        self.gui._gestisci_evento_orchestratore(
+            {"type": "agent_started", "agent_id": "direct", "title": "Agente diretto"}
+        )
+
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "agent_retry",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "message": "Nuovo tentativo richiesto",
+            }
+        )
+
+        node = self.gui.execution_nodes["direct"]
+        self.assertEqual(node.status, "retry")
+        item_id = self.gui.agent_rows["direct"]
+        self.assertEqual(self.gui.agent_list.item(item_id, "tags"), ("retry",))
+
+    def test_agent_completed_uses_single_timestamp(self):
+        self.gui._pulisci_lista_agenti()
+        self.gui._gestisci_evento_orchestratore(
+            {"type": "agent_started", "agent_id": "direct", "title": "Agente diretto"}
+        )
+        started_at = self.gui.execution_nodes["direct"].timestamp
+
+        self.gui._gestisci_evento_orchestratore(
+            {"type": "agent_completed", "agent_id": "direct", "title": "Agente diretto"}
+        )
+
+        node = self.gui.execution_nodes["direct"]
+        # Il timestamp finale è quello dell'evento completed, non una doppia scrittura.
+        self.assertEqual(node.status, "completed")
+        self.assertGreaterEqual(node.timestamp, started_at)
+        item_id = self.gui.agent_rows["direct"]
+        self.assertEqual(self.gui.agent_list.item(item_id, "values")[1], "Completato")
+
 
 if __name__ == "__main__":
     unittest.main()

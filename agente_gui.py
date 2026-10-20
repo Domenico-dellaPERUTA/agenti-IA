@@ -24,9 +24,14 @@ except ModuleNotFoundError as error:
     if error.name != "_tkinter":
         raise
     raise SystemExit(
-        "La GUI richiede un interprete Python compilato con Tkinter. "
-        "In VS Code esegui 'Python: Select Interpreter' e seleziona "
-        "un interprete che supera il test `python -c \"import tkinter\"`."
+        "La GUI richiede un interprete Python compilato con Tkinter.\n"
+        "In VS Code esegui 'Python: Select Interpreter' e seleziona un interprete "
+        "che supera il test: python -c \"import tkinter\".\n"
+        "Su questa macchina risultano compatibili, per esempio:\n"
+        "  - /usr/bin/python3 (Python di sistema macOS)\n"
+        "  - interpreti installati via pyenv (es. ~/.pyenv/versions/<ver>/bin/python)\n"
+        "L'interprete Homebrew /opt/homebrew/bin/python3 invece NON include Tkinter, "
+        "a meno di installare il pacchetto python-tk."
     ) from error
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -169,6 +174,7 @@ class AgentGUI:
         self.agent_list.tag_configure("running", foreground="#9a6700")
         self.agent_list.tag_configure("failed", foreground="#c62828")
         self.agent_list.tag_configure("completed", foreground="#218838")
+        self.agent_list.tag_configure("retry", foreground="#0b5cad")
         self.agent_list.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 8))
         self.agent_list.bind("<<TreeviewSelect>>", self._aggiorna_dettaglio_nodo)
 
@@ -247,6 +253,14 @@ class AgentGUI:
     def _pulisci_lista_agenti(self) -> None:
         """Rimuove lo stato della richiesta precedente prima di avviarne una nuova."""
         self._ensure_execution_state()
+        # Elimina gli eventi non ancora consumati della run precedente, così la
+        # nuova timeline mostra solo lo stato della richiesta in corso.
+        if hasattr(self, "events"):
+            while True:
+                try:
+                    self.events.get_nowait()
+                except queue.Empty:
+                    break
         self.agent_rows.clear()
         self.execution_nodes.clear()
         self.selected_node_key = None
@@ -509,34 +523,46 @@ class AgentGUI:
         """Aggiorna o aggiunge la voce principale di un agente nella timeline."""
         self._ensure_execution_state()
         labels = {
-            "running": ("In esecuzione", "●"),
-            "failed": ("Errore", "●"),
-            "completed": ("Completato", "●"),
+            "running": "In esecuzione",
+            "failed": "Errore",
+            "completed": "Completato",
+            "retry": "Nuovo tentativo",
         }
-        state_label, light = labels[status]
+        state_label = labels.get(status, status.title())
         item_id = self.agent_rows.get(agent_id)
         if item_id is None and f"agent:{agent_id}" in self.agent_rows:
             item_id = self.agent_rows[f"agent:{agent_id}"]
+        existing = self.execution_nodes.get(agent_id)
+        node_type = existing.node_type if existing is not None else "agente"
+        now_timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
         if hasattr(self.agent_list, "heading"):
-            values = ("agente", state_label, datetime.now().astimezone().strftime("%H:%M:%S"))
+            shown_state = (
+                f"Errore: {error}" if status == "failed" and error else state_label
+            )
+            values = (node_type, shown_state, now_timestamp)
         else:
-            values = ("agente", state_label, state_label)
+            shown_state = (
+                f"Errore: {error}" if status == "failed" and error else state_label
+            )
+            values = (node_type, shown_state, shown_state)
         if item_id is None:
             item_id = self._nuovo_nodo_esecuzione(
                 agent_id,
                 parent_key=self.execution_root_id,
-                node_type="agente",
+                node_type=node_type,
                 label=title,
                 status=status,
-                timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
+                timestamp=now_timestamp,
                 error=error,
             )
             self.agent_rows[agent_id] = item_id
         else:
-            self.agent_list.item(item_id, text=title, values=values, tags=(status,))
-            self.execution_nodes[agent_id].status = status
-            self.execution_nodes[agent_id].error = error
-            self.execution_nodes[agent_id].timestamp = values[2]
+            tag = "retry" if status == "retry" else status
+            self.agent_list.item(item_id, text=title, values=values, tags=(tag,))
+            if existing is not None:
+                existing.status = status
+                existing.error = error or existing.error
+                existing.timestamp = now_timestamp
         self.agent_rows[agent_id] = item_id
         self._mostra_dettaglio_nodo(agent_id)
 
@@ -771,47 +797,29 @@ class AgentGUI:
             self._aggiungi_output_etichettato("Orchestratore", message)
         elif event_type == "agent_started":
             key = agent_id or event.get("role", title)
-            self._nuovo_nodo_esecuzione(
-                key,
-                parent_key=self.execution_root_id,
-                node_type="agente",
-                label=actor,
-                status="running",
-                timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
-                input_data=message or "Avvio agente",
-            )
             self._imposta_stato_agente(key, actor, "running")
+            node = self.execution_nodes.get(key)
+            if node is not None and not node.input_data:
+                node.input_data = message or "Avvio agente"
             self._aggiungi_output_etichettato(actor, "Avviato")
         elif event_type == "agent_completed":
             key = agent_id or event.get("role", title)
-            self._nuovo_nodo_esecuzione(
-                key,
-                parent_key=self.execution_root_id,
-                node_type="agente",
-                label=actor,
-                status="completed",
-                timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
-                output_data=message or "Completato",
-            )
             self._imposta_stato_agente(key, actor, "completed")
+            node = self.execution_nodes.get(key)
+            if node is not None and not node.output_data:
+                node.output_data = message or "Completato"
             self._aggiungi_output_etichettato(actor, "Completato")
         elif event_type == "agent_failed":
             key = agent_id or event.get("role", title)
             error = event.get("error", "Errore non specificato")
-            self._nuovo_nodo_esecuzione(
-                key,
-                parent_key=self.execution_root_id,
-                node_type="agente",
-                label=actor,
-                status="failed",
-                timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
-                error=error,
-            )
             self._imposta_stato_agente(key, actor, "failed", error)
             self._aggiungi_output_etichettato(actor, f"Errore: {error}")
         elif event_type == "plan_warning":
             self._aggiungi_output_etichettato("Pianificatore", f"Nota sul piano: {message}\n\n")
         elif event_type == "agent_retry":
+            node_key = agent_id or event.get("role", title)
+            if node_key in self.execution_nodes:
+                self._imposta_stato_agente(node_key, actor, "retry")
             self._aggiungi_output_etichettato(actor, f"Nuovo tentativo: {message}\n\n")
         elif event_type == "mode_selected":
             self._aggiungi_output_etichettato("Orchestratore", f"{message}\n\n")
@@ -819,6 +827,26 @@ class AgentGUI:
             current_status = event.get("status", "update")
             label = "Stato agente" if event_type == "agent_status" else "Stato task"
             actor_name = actor if event_type == "agent_status" else title
+            node_key = (
+                agent_id if event_type == "agent_status" else f"task:{task_id}"
+            )
+            if node_key and node_key in self.execution_nodes:
+                node = self.execution_nodes[node_key]
+                node.timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
+                if message:
+                    node.output_data = f"{current_status}: {message}"
+                item_id = self.agent_rows.get(node_key)
+                if item_id is not None and hasattr(self.agent_list, "heading"):
+                    self.agent_list.item(
+                        item_id,
+                        values=(
+                            node.node_type,
+                            self._formatta_stato_compatibile(node.status, node.error),
+                            node.timestamp,
+                        ),
+                    )
+                if self.selected_node_key in (None, node_key):
+                    self._mostra_dettaglio_nodo(node_key)
             self._aggiungi_output_etichettato(
                 actor_name,
                 f"{label}: {current_status} · {message}\n\n",
@@ -932,16 +960,20 @@ class AgentGUI:
             self._aggiungi_output_etichettato("Orchestratore", f"Evento non riconosciuto: {event}\n")
 
     def _segna_agenti_in_corso_come_errore(self, error: str) -> None:
-        """Rende visibile l'errore finale sugli agenti rimasti in esecuzione."""
-        for agent_id, item_id in list(self.agent_rows.items()):
-            node = self.execution_nodes.get(agent_id)
-            if node is not None and node.status == "running":
-                self._imposta_stato_agente(
-                    agent_id,
-                    node.label,
-                    "failed",
-                    error,
-                )
+        """Rende visibile l'errore finale sugli agenti ancora in esecuzione.
+
+        Si limita ai nodi di tipo ``agente`` e ``task`` per non alterare la
+        radice della richiesta, le fasi già registrate o le chiamate agli
+        strumenti concluse: l'errore è dell'intera esecuzione, ma la timeline
+        deve restare leggibile.
+        """
+        for key in list(self.agent_rows.keys()):
+            node = self.execution_nodes.get(key)
+            if node is None or node.status != "running":
+                continue
+            if node.node_type not in {"agente", "task"}:
+                continue
+            self._imposta_stato_agente(key, node.label, "failed", error)
 
     def _aggiungi_output(self, testo: str) -> None:
         """Accoda testo al log e scorre automaticamente all'ultima riga."""
