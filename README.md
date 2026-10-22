@@ -182,6 +182,15 @@ sono avviati con concorrenza limitata e ricevono solo strumenti di lettura;
 un agente distinto sintetizza i risultati e segnala le attività non riuscite.
 Ogni worker riceve le proprie istruzioni e soltanto l'eventuale contesto
 selezionato per quel task, non la cronologia o il contesto degli altri worker.
+L'orchestratore segue il modello "agente padre → agenti figlio": il pianificatore
+decompone la richiesta, i worker (figli) restituiscono sempre un ``TaskResult``
+— anche in caso di errore — e il sintetizzatore (padre) valuta i risultati
+riusciti e falliti. Nessun fallimento di un singolo figlio interrompe i
+fratelli o l'albero: un errore è anch'esso un risultato che il padre valuta.
+Questo contratto vale ora anche per i nodi strutturali (planner, ricercatore,
+scrittore, agente diretto e sintetizzatore), raccolti in ``result.failures``
+come ``OrchestrationFailure`` invece di propagare un'eccezione che bloccherebbe
+tutta la richiesta.
 Se il planner seleziona `direct` ma restituisce anche task, l'app avvisa
 l'utente e segue la modalità diretta, ignorando i task incoerenti: questo
 evita che un piano incoerente blocchi la richiesta originale.
@@ -236,6 +245,8 @@ result = orchestrator.run(
 print(result.answer)
 for task in result.tasks:
     print(task.task_id, task.status, task.error or "")
+for failure in result.failures:
+    print(failure.role, failure.error)
 ```
 
 `max_workers` è compreso tra 1 e 4; il numero di task pianificati è limitato a

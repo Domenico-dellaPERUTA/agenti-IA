@@ -71,8 +71,17 @@ def main() -> None:
     except Exception as error:
         _stampa_output_cli("⚙️", "Orchestratore", f"Errore durante l'esecuzione: {error}")
         return
+    if result.failures:
+        for failure in result.failures:
+            _stampa_output_cli(
+                "🧭",
+                failure.role,
+                f"Fase non riuscita: {failure.error}",
+            )
     if result.answer:
         _stampa_output_cli("⚙️", "Risultato finale", result.answer)
+    elif not result.tasks and not result.failures:
+        _stampa_output_cli("⚙️", "Risultato finale", "(nessuna risposta prodotta)")
 
 
 def _mostra_evento_cli(event: dict[str, str]) -> None:

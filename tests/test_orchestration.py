@@ -136,13 +136,19 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(result.mode, "parallel")
         self.assertEqual([item.task_id for item in result.tasks], ["search", "summarize"])
 
-    def test_invalid_planner_response_is_emitted_before_failure(self):
+    def test_invalid_planner_response_is_emitted_as_failure_result(self):
         raw_response = "Non riesco a produrre il piano richiesto."
         orchestrator, _ = self.make_orchestrator(raw_response)
         events = []
 
-        with self.assertRaisesRegex(OrchestrationError, "JSON non valido"):
-            orchestrator.run("Analizza", on_event=events.append)
+        result = orchestrator.run("Analizza", on_event=events.append)
+
+        self.assertEqual(result.mode, "direct")
+        self.assertEqual(result.tasks, [])
+        self.assertIsNone(result.answer)
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].role, "planner")
+        self.assertIn("JSON non valido", result.failures[0].error)
 
         response_event = next(
             event for event in events if event["type"] == "model_response"
@@ -249,14 +255,19 @@ class OrchestrationTests(unittest.TestCase):
         state["writer_answer"] = "Il file richiesti.txt è stato creato."
         events = []
 
-        with self.assertRaisesRegex(OrchestrationError, "non ha verificato"):
-            orchestrator.run(
-                "Cerca e creami un file con i risultati",
-                on_event=events.append,
-            )
+        result = orchestrator.run(
+            "Cerca e creami un file con i risultati",
+            on_event=events.append,
+        )
 
+        # La ricerca è riuscita, quindi la risposta conserva i risultati web
+        # mentre il fallimento del writer resta un risultato valutato dal padre.
+        self.assertEqual(result.answer, "Risultati verificabili e fonti")
         self.assertEqual(state["direct_runs"], 0)
         self.assertEqual(state["writer_runs"], 2)
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].role, "file_writer")
+        self.assertIn("non ha verificato", result.failures[0].error)
         self.assertNotIn(
             "Il file richiesti.txt è stato creato.",
             [event.get("message") for event in events],
@@ -400,7 +411,7 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual([item.status for item in result.tasks], ["failed", "failed"])
         self.assertEqual(state["syntheses"], 0)
 
-    def test_invalid_plan_fails_before_workers_start(self):
+    def test_invalid_plan_is_reported_as_failure_result(self):
         orchestrator, state = self.make_orchestrator(
             self.parallel_plan(
                 self.task("duplicate", "primo"),
@@ -408,15 +419,18 @@ class OrchestrationTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaisesRegex(OrchestrationError, "duplicato"):
-            orchestrator.run("Analizza")
+        result = orchestrator.run("Analizza")
 
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].role, "planner")
+        self.assertIn("duplicato", result.failures[0].error)
         self.assertEqual(len(state["agents"]), 1)
 
     def test_rejects_malformed_json_and_limits(self):
         malformed, malformed_state = self.make_orchestrator("```json\n{}\n```")
-        with self.assertRaisesRegex(OrchestrationError, "JSON non valido"):
-            malformed.run("Analizza")
+        malformed_result = malformed.run("Analizza")
+        self.assertEqual(len(malformed_result.failures), 1)
+        self.assertIn("JSON non valido", malformed_result.failures[0].error)
         self.assertEqual(len(malformed_state["agents"]), 1)
 
         too_many, _ = self.make_orchestrator(
@@ -424,8 +438,9 @@ class OrchestrationTests(unittest.TestCase):
                 *(self.task(f"task-{index}", "istruzioni") for index in range(6))
             )
         )
-        with self.assertRaisesRegex(OrchestrationError, "da 2 a 5"):
-            too_many.run("Analizza")
+        too_many_result = too_many.run("Analizza")
+        self.assertEqual(len(too_many_result.failures), 1)
+        self.assertIn("da 2 a 5", too_many_result.failures[0].error)
 
     def test_validates_worker_configuration(self):
         with self.assertRaisesRegex(ValueError, "tra 1 e 4"):

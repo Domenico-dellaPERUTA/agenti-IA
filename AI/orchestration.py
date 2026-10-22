@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 from collections.abc import Callable
@@ -98,12 +98,40 @@ class TaskResult:
 
 
 @dataclass(frozen=True)
+class OrchestrationFailure:
+    """Esito fallito di una fase strutturale dell'albero di orchestrazione.
+
+    A differenza di un ``TaskResult`` (esito di un worker figlio), questo
+    descrive il fallimento di un nodo padre come il pianificatore, il
+    ricercatore, lo scrittore o il sintetizzatore. Anche questi errori sono
+    un risultato che il padre valuta invece di interrompere l'intera richiesta.
+    """
+
+    role: str
+    error: str
+
+
+@dataclass(frozen=True)
 class OrchestrationResult:
-    """Risposta e risultati ordinati secondo il piano di esecuzione."""
+    """Risposta e risultati ordinati secondo il piano di esecuzione.
+
+    ``answer`` può essere ``None`` quando nessuna fase ha prodotto un risultato
+    utilizzabile; ``failures`` raccoglie gli errori strutturali dei nodi padre
+    (planner/ricercatore/scrittore/sintetizzatore) così che la GUI e la CLI
+    possano mostrarli senza dover interrompere l'orchestrazione.
+    """
 
     answer: str | None
     tasks: list[TaskResult]
     mode: Mode
+    failures: list[OrchestrationFailure] = field(default_factory=list)
+
+    @property
+    def has_failures(self) -> bool:
+        """True se qualche task worker o fase strutturale è fallita."""
+        return bool(self.failures) or any(
+            task.status == "failed" for task in self.tasks
+        )
 
 
 @dataclass(frozen=True)
@@ -164,7 +192,23 @@ class AgentOrchestrator:
             raise ValueError("La richiesta non può essere vuota.")
 
         self._emit(on_event, "planning_started", message="Analisi della richiesta")
-        plan = self._create_plan(request.strip(), on_event)
+        # Il fallimento del pianificatore è un risultato che il padre valuta,
+        # non una condizione che interrompe l'intera richiesta: senza un piano
+        # valido non ci sono figli da avviare, quindi il risultato resta vuoto.
+        try:
+            plan = self._create_plan(request.strip(), on_event)
+        except Exception as error:
+            return OrchestrationResult(
+                answer=None,
+                tasks=[],
+                mode="direct",
+                failures=[
+                    OrchestrationFailure(
+                        role="planner",
+                        error=str(error) or type(error).__name__,
+                    )
+                ],
+            )
         self._emit(
             on_event,
             "mode_selected",
@@ -179,14 +223,47 @@ class AgentOrchestrator:
             if requires_file_creation and _requires_web_research(request):
                 # Per richieste composte, il writer riceve soltanto l'output
                 # concluso del ricercatore e non può avviare ricerche proprie.
-                research_output = self._research_for_file(request.strip(), on_event)
-                file_answer = self._create_file_from_results(
-                    request.strip(),
-                    research_output,
-                    on_event,
+                failures: list[OrchestrationFailure] = []
+                research_output: str | None = None
+                try:
+                    research_output = self._research_for_file(
+                        request.strip(), on_event
+                    )
+                except Exception as error:
+                    failures.append(
+                        OrchestrationFailure(
+                            role="researcher",
+                            error=str(error) or type(error).__name__,
+                        )
+                    )
+                research_summary = research_output or (
+                    "La ricerca web non ha prodotto risultati verificabili."
                 )
-                answer = f"{research_output}\n\n{file_answer}"
-                return OrchestrationResult(answer=answer, tasks=[], mode="direct")
+                try:
+                    file_answer = self._create_file_from_results(
+                        request.strip(),
+                        research_summary,
+                        on_event,
+                    )
+                except Exception as error:
+                    failures.append(
+                        OrchestrationFailure(
+                            role="file_writer",
+                            error=str(error) or type(error).__name__,
+                        )
+                    )
+                    answer = research_output if research_output is not None else None
+                    return OrchestrationResult(
+                        answer=answer, tasks=[], mode="direct", failures=failures
+                    )
+                answer = (
+                    f"{research_output}\n\n{file_answer}"
+                    if research_output is not None
+                    else file_answer
+                )
+                return OrchestrationResult(
+                    answer=answer, tasks=[], mode="direct", failures=failures
+                )
 
             self._emit(
                 on_event,
@@ -308,7 +385,19 @@ class AgentOrchestrator:
                     title="Agente diretto",
                     error=str(error) or type(error).__name__,
                 )
-                raise
+                # Anche il fallimento dell'agente diretto è un risultato che il
+                # padre valuta: non interrompe l'orchestrazione né la GUI.
+                return OrchestrationResult(
+                    answer=None,
+                    tasks=[],
+                    mode="direct",
+                    failures=[
+                        OrchestrationFailure(
+                            role="direct",
+                            error=str(error) or type(error).__name__,
+                        )
+                    ],
+                )
             self._emit(
                 on_event,
                 "agent_completed",
@@ -336,7 +425,17 @@ class AgentOrchestrator:
             }
             for future in as_completed(futures):
                 task = futures[future]
-                results_by_id[task.id] = future.result()
+                # Un errore inatteso fuori dal normale ciclo del worker viene
+                # convertito in un TaskResult fallito: così nessun figlio può
+                # interrompere i fratelli né l'intero albero.
+                try:
+                    results_by_id[task.id] = future.result()
+                except Exception as error:
+                    results_by_id[task.id] = TaskResult(
+                        task_id=task.id,
+                        status="failed",
+                        error=str(error) or type(error).__name__,
+                    )
 
         # Ripristina l'ordine del piano, non quello casuale di completamento.
         results = [results_by_id[task.id] for task in plan.tasks]
@@ -344,24 +443,59 @@ class AgentOrchestrator:
         if not successful:
             if not _requires_file_creation(request):
                 return OrchestrationResult(answer=None, tasks=results, mode="parallel")
-            answer = self._create_file_from_results(
-                request.strip(),
-                "Nessun task di ricerca è riuscito. Errori e stati dei task:\n"
-                f"{self._serialize_task_results(results)}",
-                on_event,
+            try:
+                answer = self._create_file_from_results(
+                    request.strip(),
+                    "Nessun task di ricerca è riuscito. Errori e stati dei task:\n"
+                    f"{self._serialize_task_results(results)}",
+                    on_event,
+                )
+                failures: list[OrchestrationFailure] = []
+            except Exception as error:
+                failures = [
+                    OrchestrationFailure(
+                        role="file_writer",
+                        error=str(error) or type(error).__name__,
+                    )
+                ]
+                answer = None
+            return OrchestrationResult(
+                answer=answer, tasks=results, mode="parallel", failures=failures
             )
-            return OrchestrationResult(answer=answer, tasks=results, mode="parallel")
 
         self._emit(on_event, "synthesis_started", message="Riunione dei risultati")
-        answer = self._synthesize(request.strip(), results, on_event)
-        if _requires_file_creation(request):
-            file_answer = self._create_file_from_results(
-                request.strip(),
-                f"Risultati dei task:\n{self._serialize_task_results(results)}",
-                on_event,
+        failures: list[OrchestrationFailure] = []
+        try:
+            answer = self._synthesize(request.strip(), results, on_event)
+        except Exception as error:
+            failures.append(
+                OrchestrationFailure(
+                    role="synthesizer",
+                    error=str(error) or type(error).__name__,
+                )
             )
-            answer = f"{answer}\n\n{file_answer}"
-        return OrchestrationResult(answer=answer, tasks=results, mode="parallel")
+            answer = None
+        if _requires_file_creation(request):
+            try:
+                file_answer = self._create_file_from_results(
+                    request.strip(),
+                    f"Risultati dei task:\n{self._serialize_task_results(results)}",
+                    on_event,
+                )
+                if answer is not None:
+                    answer = f"{answer}\n\n{file_answer}"
+                else:
+                    answer = file_answer
+            except Exception as error:
+                failures.append(
+                    OrchestrationFailure(
+                        role="file_writer",
+                        error=str(error) or type(error).__name__,
+                    )
+                )
+        return OrchestrationResult(
+            answer=answer, tasks=results, mode="parallel", failures=failures
+        )
 
     @staticmethod
     def _serialize_task_results(results: list[TaskResult]) -> str:

@@ -705,9 +705,7 @@ class AgentGUI:
                     elif tipo == "risultato":
                         if isinstance(contenuto, OrchestrationResult):
                             answer = contenuto.answer
-                            has_failures = any(
-                                task.status == "failed" for task in contenuto.tasks
-                            )
+                            has_failures = contenuto.has_failures
                             status = (
                                 "Completato con errori"
                                 if has_failures
@@ -724,6 +722,20 @@ class AgentGUI:
                                 "message": answer or "(nessuna sintesi disponibile)",
                             }
                         )
+                        if isinstance(contenuto, OrchestrationResult) and contenuto.failures:
+                            for failure in contenuto.failures:
+                                self._registra_evento_timeline(
+                                    {
+                                        "type": "phase_failed",
+                                        "agent_id": failure.role,
+                                        "title": failure.role,
+                                        "error": failure.error,
+                                    }
+                                )
+                                self._aggiungi_output_etichettato(
+                                    failure.role,
+                                    f"Fase non riuscita: {failure.error}\n\n",
+                                )
                         self._aggiungi_output_etichettato(
                             "Orchestratore",
                             "Risultato finale:\n"
