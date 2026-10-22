@@ -35,7 +35,11 @@ Il progetto ha una base architetturale sana e riconoscibile:
   l’esecuzione di planner, agenti, task e tool, con pannello di dettaglio per
   input, output ed errori di ogni nodo. Ogni evento ricevuto viene conservato
   come fase distinta sotto l'agente/task di riferimento, con payload originale
-  consultabile nel pannello di dettaglio.
+  consultabile nel pannello di dettaglio. Una colonna «Attività corrente»
+  indica cosa sta facendo ogni nodo adesso (per esempio «In attesa della
+  risposta del modello», «Esegue lo strumento web_search»), riassunta anche nel
+  pannello «Agenti attivi adesso» sopra la timeline; nel log la risposta finale
+  è un blocco evidenziato con sfondo verde e gli errori uno con sfondo rosato.
 
 In sintesi, il progetto è già in grado di dimostrare un modello di agent
 robusto e interessante per uso di laboratorio e per prototipi funzionali.
@@ -78,6 +82,42 @@ robusto e interessante per uso di laboratorio e per prototipi funzionali.
   - All'avvio di una nuova richiesta la coda degli eventi residui della run
     precedente viene svuotata: evita che stati obsoleti si manifestino nella
     timeline appena creata.
+  - Ogni nodo conserva un campo `activity`, tradotto dagli eventi
+    (`_descrivi_attivita_da_evento`) in una descrizione leggibile del lavoro in
+    corso («Avvio in corso», «In attesa della risposta del modello», «Esegue lo
+    strumento …», «Interrotto per errore»); la colonna «Attività corrente»
+    della timeline, il pannello «Agenti attivi adesso» e la barra di stato
+    restano sincronizzati tramite `_aggiorna_attivita_nodo` e
+    `_sincronizza_riepilogo`. Il nodo radice della richiesta viene marcato
+    concluso (o in errore) quando arriva il risultato finale.
+  - Il nome di un tool selezionato viene ricavato da `tool_name` o dal testo
+    della chiamata (`nome(argomenti)`), perché gli eventi `tool_selected`
+    emessi da `_emit_response` non includono `tool_name`: senza questa
+    ricostruzione il nodo tool mostrava il titolo dell'agente invece dello
+    strumento.
+  - Nel log il blocco della risposta finale è reso con icona dedicata e sfondo
+    evidenziato (tag `finale`), i fallimenti con sfondo rosato (tag `errore`) e
+    le intestazioni dei blocchi colorate per ruolo: `_aggiungi_output_etichettato`
+    accetta una `variante` e passa i metadati di stile a `_aggiungi_output`
+    senza cambiare il formato testuale dei blocchi, che i test verificano.
+  - I colori della GUI (blocchi del log, tag della timeline, pannello degli
+    agenti attivi) sono scelti da palette distinte per tema chiaro e scuro:
+    `_rileva_tema_scuro` misura la luminanza dello sfondo effettivo del widget
+    e `_PALETTE_LOG`, `_PALETTE_TIMELINE` e `_PALETTE_RIEPILOGO` garantiscono
+    che con il tema scuro gli sfondi evidenziati restino scuri e i testi dei
+    ruoli leggibili sul testo chiaro predefinito. In caso di rilevamento
+    impossibile si ricade sulla palette chiara.
+  - Nessuna riga resta «In esecuzione» a run conclusa: le fasi istantanee
+    (eventi registrati) hanno stato «Registrato» invece di «In esecuzione», e
+    il risultato di uno strumento aggiorna il nodo tool aperto da
+    `tool_selected` invece di crearne uno nuovo (tracciato in
+    `_strumenti_in_corso`, chiave (padre, nome strumento)); il nodo radice
+    della richiesta viene marcato concluso o in errore all'arrivo del risultato.
+  - Il log interpreta il markdown del modello con un parser leggero e puro
+    (`_spazi_markdown`, testato unitariamente) che produce intervalli per i tag
+    `md_*` del widget log; gli stili di blocco (risposta finale, errori) hanno
+    priorità più alta dei tag markdown, così lo sfondo evidenziato non si
+    interrompe nemmeno su codice o testo formattato.
 
 ### Cose da fare
 
@@ -289,7 +329,13 @@ aggiungere strumenti, registra funzioni con `Agent.add_tool()`.
   citazioni alla risposta.
 - Il log GUI separa gli eventi in blocchi: ogni intestazione mostra un'icona,
   data e ora locale, agente e strumento quando pertinente; la descrizione
-  dell'attività segue su una riga indentata.
+  dell'attività segue su una riga indentata. La risposta finale è evidenziata
+  da un blocco con sfondo verde e i fallimenti da uno con sfondo rosato, così
+  si distinguono dagli eventi intermedi. Il corpo dei blocchi è reso con una
+  vista 'markdown leggera' (intestazioni, grassetto, corsivo, codice inline e
+  a blocchi, marker degli elenchi, link e righe orizzontali): il contenuto del
+  widget non viene riscritto, i delimitatori markdown sono semplicemente elisi,
+  quindi copia e incolla preservano il testo originale.
 - La CLI usa lo stesso formato a blocchi per richiesta, risposte intermedie,
   risultati degli strumenti e risposta finale.
 - Il progetto non include un modello linguistico: occorre installare e avviare
@@ -422,9 +468,12 @@ python agente_gui.py
 La finestra permette di scegliere la cartella sandbox, scrivere una richiesta
 e inviarla con il pulsante o con **Ctrl+Invio**. La sandbox predefinita è
 `sandbox/` nella cartella del progetto. Il pulsante **Info strumenti** descrive
-le azioni disponibili e le relative cautele; la tabella degli agenti mostra in
+le azioni disponibili e le relative cautele; la timeline degli agenti mostra in
 tempo reale pianificatore, worker e sintetizzatore con un indicatore colorato
-per stato. Se l'agente propone di eseguire uno
+per stato e una colonna «Attività corrente» che descrive il lavoro in corso di
+ogni nodo; il pannello **Agenti attivi adesso** riepiloga chi sta lavorando e
+cosa sta facendo, e nel log la risposta finale è evidenziata rispetto agli
+eventi intermedi. Se l'agente propone di eseguire uno
 script Bash, la GUI mostra il contenuto completo e avvisa che lo script opera
 con i privilegi dell'utente corrente; si può approvare o annullare. Lo script
 temporaneo e i file temporanei destinati al comando vengono eliminati al

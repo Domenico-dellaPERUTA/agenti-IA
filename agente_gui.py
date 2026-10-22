@@ -14,6 +14,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import queue
+import re
 import sys
 import threading
 
@@ -39,6 +40,82 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from AI import AI, LMStudioProvider, OrchestrationResult
+
+
+# --- Rendering markdown nel log -------------------------------------------
+# Il widget Text del log resta testo puro: il rendering è ottenuto con tag,
+# senza alterare il contenuto (copia/incolla preservano il markdown originale).
+_MD_INTESTAZIONE = re.compile(r"^\s*(#{1,3})\s+(.+?)\s*$")
+_MD_ELENCO = re.compile(r"^(\s*)([-*+]|\d+[.)])(\s+)")
+_MD_RIGA_ORIZZONTALE = re.compile(r"^\s*([-*_])(?:\s*\1){2,}\s*$")
+_MD_FENCE_CODICE = re.compile(r"^\s*```")
+_MD_LINK = re.compile(r"\[([^\]\n]+)\]\(([^)\n]+)\)")
+# L'ordine delle alternative conta: il grassetto va prima del corsivo perché
+# entrambi usano l'asterisco come delimitatore.
+_MD_INLINE = re.compile(
+    r"(?P<grassetto>\*\*.+?\*\*)"
+    r"|(?P<codice>`[^`\n]+`)"
+    r"|(?P<collegamento>\[[^\]\n]+\]\([^)\n]+\))"
+    r"|(?P<corsivo>\*[^\s*][^*\n]*\*)"
+)
+
+
+def _spazi_markdown(linee: list[str]) -> list[tuple[int, int | str, int | str, str]]:
+    """Calcola gli intervalli da stilare per una vista 'markdown leggera'.
+
+    Funzione pura e testabile: data la lista delle righe del corpo di un blocco
+    del log, restituisce tuple ``(indice riga, colonna inizio, colonna fine,
+    nome tag)``. Il testo sorgente non viene modificato: i delimitatori
+    markdown ricevono il tag ``md_delim``, che il widget configura come eliso.
+    """
+    spazi: list[tuple[int, int | str, int | str, str]] = []
+    in_blocco_codice = False
+    for indice, linea in enumerate(linee):
+        if _MD_FENCE_CODICE.match(linea):
+            in_blocco_codice = not in_blocco_codice
+            spazi.append((indice, 0, "lineend", "md_delim"))
+            continue
+        if in_blocco_codice:
+            spazi.append((indice, 0, "lineend", "md_codice"))
+            continue
+        intestazione = _MD_INTESTAZIONE.match(linea)
+        if intestazione:
+            inizio_testo = intestazione.start(2)
+            spazi.append((indice, 0, inizio_testo, "md_delim"))
+            livello = len(intestazione.group(1))
+            spazi.append((indice, inizio_testo, "lineend", f"md_h{livello}"))
+            continue
+        if _MD_RIGA_ORIZZONTALE.match(linea):
+            spazi.append((indice, 0, "lineend", "md_hr"))
+            continue
+        elenco = _MD_ELENCO.match(linea)
+        if elenco:
+            spazi.append((indice, elenco.start(2), elenco.end(2), "md_marker"))
+        for match in _MD_INLINE.finditer(linea):
+            inizio, fine = match.start(), match.end()
+            tipo = match.lastgroup
+            if tipo == "collegamento":
+                parti = _MD_LINK.fullmatch(match.group(0))
+                if parti is None:
+                    continue
+                spazi.append((indice, inizio, inizio + 1, "md_delim"))
+                spazi.append(
+                    (indice, inizio + 1, inizio + parti.end(1), "md_link")
+                )
+                spazi.append((indice, inizio + parti.end(1), fine, "md_delim"))
+                continue
+            larghezza_delim = 2 if tipo == "grassetto" else 1
+            tag = {
+                "grassetto": "md_grassetto",
+                "corsivo": "md_corsivo",
+                "codice": "md_codice",
+            }[tipo]
+            spazi.append((indice, inizio, inizio + larghezza_delim, "md_delim"))
+            spazi.append(
+                (indice, inizio + larghezza_delim, fine - larghezza_delim, tag)
+            )
+            spazi.append((indice, fine - larghezza_delim, fine, "md_delim"))
+    return spazi
 
 
 @dataclass
@@ -68,10 +145,95 @@ class ExecutionNode:
     input_data: str = ""
     output_data: str = ""
     error: str = ""
+    # Cosa sta facendo adesso il nodo ("In attesa della risposta del modello…").
+    activity: str = ""
 
 
 class AgentGUI:
     """App demo per conversazioni, sandbox, approvazione script e log live."""
+
+    # Palette dei colori dell'interfaccia: la voce da usare dipende dal tema
+    # rilevato sullo sfondo reale del widget. Con il tema scuro gli sfondi di
+    # evidenziazione sono scuri e i testi dei ruoli più chiari, così restano
+    # leggibili sul testo chiaro predefinito della modalità scura.
+    _PALETTE_LOG = {
+        False: {
+            "ruolo_utente": "#0b5cad",
+            "ruolo_pianificatore": "#6f35a8",
+            "ruolo_orchestratore": "#57534e",
+            "ruolo_diretto": "#8a5a00",
+            "ruolo_ricerca": "#0b7285",
+            "ruolo_writer": "#b05a2a",
+            "ruolo_sintesi": "#5c3d99",
+            "ruolo_script": "#14532d",
+            "finale_sfondo": "#e6f4ea",
+            "finale_intestazione": "#1e7e34",
+            "errore_sfondo": "#fdecea",
+            "md_codice_sfondo": "#eef1f4",
+            "md_marker": "#9a6700",
+            "md_link": "#0b5cad",
+        },
+        True: {
+            "ruolo_utente": "#6ea8ff",
+            "ruolo_pianificatore": "#c79bff",
+            "ruolo_orchestratore": "#b7b1a9",
+            "ruolo_diretto": "#e3b35c",
+            "ruolo_ricerca": "#5fd0de",
+            "ruolo_writer": "#f09a63",
+            "ruolo_sintesi": "#bfa8ff",
+            "ruolo_script": "#7ed491",
+            "finale_sfondo": "#1e3d28",
+            "finale_intestazione": "#7ee2a0",
+            "errore_sfondo": "#4a2320",
+            "md_codice_sfondo": "#2c313a",
+            "md_marker": "#e5b54d",
+            "md_link": "#6ea8ff",
+        },
+    }
+    _PALETTE_TIMELINE = {
+        False: {
+            "running": "#9a6700",
+            "failed": "#c62828",
+            "completed": "#218838",
+            "retry": "#0b5cad",
+            "registered": "#666666",
+        },
+        True: {
+            "running": "#e5b54d",
+            "failed": "#ef9a9a",
+            "completed": "#7bd88a",
+            "retry": "#6fa8ff",
+            "registered": "#9a9a9a",
+        },
+    }
+    _PALETTE_RIEPILOGO = {
+        False: {
+            "running": "#9a6700",
+            "retry": "#0b5cad",
+            "default": "#333333",
+            "placeholder": "#6b6b6b",
+        },
+        True: {
+            "running": "#e5b54d",
+            "retry": "#6fa8ff",
+            "default": "#d4d4d4",
+            "placeholder": "#9a9a9a",
+        },
+    }
+
+    def _rileva_tema_scuro(self, widget: tk.Widget) -> bool:
+        """True se lo sfondo effettivo del widget è scuro (testo chiaro).
+
+        La decisione si basa sulla luminanza del colore reale risolto da Tk
+        (compatibile anche con i colori simbolici di macOS Aqua): se non è
+        possibile leggerlo si ricade sulla palette chiara.
+        """
+        try:
+            rgb = widget.winfo_rgb(str(widget.cget("background")))
+        except (tk.TclError, AttributeError, TypeError, ValueError):
+            return False
+        luminanza = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 65535.0
+        return luminanza < 0.5
 
     def __init__(self, window: tk.Tk):
         """Imposta la finestra principale, stato condiviso e polling eventi."""
@@ -113,6 +275,13 @@ class AgentGUI:
         self.execution_nodes: dict[str, ExecutionNode] = {}
         self.execution_root_id = "execution-root"
         self.selected_node_key: str | None = None
+        # Nodi tool "running" in attesa del tool_result: la chiave è
+        # (padre, nome strumento), così il risultato aggiorna lo stesso nodo
+        # invece di lasciare una riga appesa allo stato 'In esecuzione'.
+        self._strumenti_in_corso: dict[tuple[str, str], str] = {}
+        # Metadati del blocco in corso di scrittura nel log (agente/variante),
+        # letti e consumati da _aggiungi_output per applicare gli stili.
+        self._tag_blocco_pendente: dict[str, str] | None = None
 
         self.cartella_sandbox = tk.StringVar(
             value=str(PROJECT_ROOT / "sandbox")
@@ -124,10 +293,11 @@ class AgentGUI:
 
     def _crea_interfaccia(self) -> None:
         """Costruisce i controlli Tk e collega widget a callback dell'app."""
+        self.tema_scuro = self._rileva_tema_scuro(self.window)
         frame = ttk.Frame(self.window, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(6, weight=1)
+        frame.rowconfigure(7, weight=1)
 
         ttk.Label(frame, text="Cartella sandbox").grid(
             row=0, column=0, sticky=tk.W
@@ -151,15 +321,39 @@ class AgentGUI:
             command=self._mostra_info_strumenti,
         ).pack(side=tk.LEFT, padx=(8, 0))
 
+        riepilogo_frame = ttk.LabelFrame(
+            frame, text="Agenti attivi adesso", padding=(8, 6)
+        )
+        riepilogo_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+        self.riepilogo_frame = riepilogo_frame
+        try:
+            self.riepilogo_bg: str = ttk.Style(self.window).lookup(
+                "TLabelframe", "background"
+            )
+        except tk.TclError:
+            self.riepilogo_bg = ""
+        self.riepilogo_voci: dict[str, tk.Label] = {}
+        self._colori_riepilogo = self._PALETTE_RIEPILOGO[self.tema_scuro]
+        opzioni_riepilogo: dict[str, object] = {"anchor": tk.W, "justify": tk.LEFT}
+        if self.riepilogo_bg:
+            opzioni_riepilogo["background"] = self.riepilogo_bg
+        self.riepilogo_placeholder = tk.Label(
+            riepilogo_frame,
+            text="Nessun agente in esecuzione al momento.",
+            foreground=self._colori_riepilogo["placeholder"],
+            **opzioni_riepilogo,
+        )
+        self.riepilogo_placeholder.pack(fill=tk.X)
+
         agent_frame = ttk.LabelFrame(frame, text="Timeline di esecuzione", padding=6)
-        agent_frame.grid(row=3, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
+        agent_frame.grid(row=4, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
         agent_frame.columnconfigure(0, weight=3)
         agent_frame.columnconfigure(1, weight=2)
         agent_frame.rowconfigure(0, weight=1)
 
         self.agent_list = ttk.Treeview(
             agent_frame,
-            columns=("tipo", "stato", "tempo"),
+            columns=("tipo", "stato", "tempo", "attivita"),
             show="tree headings",
             height=8,
         )
@@ -167,14 +361,15 @@ class AgentGUI:
         self.agent_list.heading("tipo", text="Tipo")
         self.agent_list.heading("stato", text="Stato")
         self.agent_list.heading("tempo", text="Tempo")
-        self.agent_list.column("#0", width=260, minwidth=180, stretch=True)
-        self.agent_list.column("tipo", width=120, minwidth=100, stretch=False)
+        self.agent_list.heading("attivita", text="Attività corrente")
+        self.agent_list.column("#0", width=240, minwidth=160, stretch=True)
+        self.agent_list.column("tipo", width=110, minwidth=90, stretch=False)
         self.agent_list.column("stato", width=120, minwidth=100, stretch=False)
-        self.agent_list.column("tempo", width=110, minwidth=90, stretch=False)
-        self.agent_list.tag_configure("running", foreground="#9a6700")
-        self.agent_list.tag_configure("failed", foreground="#c62828")
-        self.agent_list.tag_configure("completed", foreground="#218838")
-        self.agent_list.tag_configure("retry", foreground="#0b5cad")
+        self.agent_list.column("tempo", width=100, minwidth=80, stretch=False)
+        self.agent_list.column("attivita", width=200, minwidth=140, stretch=True)
+        colori_timeline = self._PALETTE_TIMELINE[self.tema_scuro]
+        for stato, colore in colori_timeline.items():
+            self.agent_list.tag_configure(stato, foreground=colore)
         self.agent_list.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 8))
         self.agent_list.bind("<<TreeviewSelect>>", self._aggiorna_dettaglio_nodo)
 
@@ -190,15 +385,15 @@ class AgentGUI:
         self.node_details.grid(row=0, column=2, sticky=tk.NSEW)
 
         ttk.Label(frame, text="Richiesta per l'agente").grid(
-            row=4, column=0, columnspan=2, sticky=tk.W
+            row=5, column=0, columnspan=2, sticky=tk.W
         )
         self.prompt = tk.Text(frame, height=8, wrap=tk.WORD)
-        self.prompt.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(4, 8))
+        self.prompt.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(4, 8))
         self.prompt.insert("1.0", self.initial_prompt)
         self.prompt.bind("<Control-Return>", self._avvia_da_tastiera)
 
         controls = ttk.Frame(frame)
-        controls.grid(row=6, column=0, columnspan=2, sticky=tk.NSEW)
+        controls.grid(row=7, column=0, columnspan=2, sticky=tk.NSEW)
         controls.columnconfigure(0, weight=1)
         controls.rowconfigure(1, weight=1)
         self.pulsante_avvia = ttk.Button(
@@ -213,8 +408,70 @@ class AgentGUI:
             controls, wrap=tk.WORD, state=tk.DISABLED, height=18
         )
         self.output.grid(row=1, column=0, columnspan=2, sticky=tk.NSEW)
+        # Stili del log: intestazioni colorate per ruolo e blocchi marcati per
+        # la risposta finale e gli errori, così sono distinguibili a colpo d'occhio.
+        # I colori vengono dalla palette coerente con il tema (chiaro/scuro)
+        # rilevato sullo sfondo reale del widget all'avvio.
+        palette_log = self._PALETTE_LOG[self.tema_scuro]
+        self.output.tag_configure(
+            "intestazione_log", font=("TkDefaultFont", 10, "bold")
+        )
+        for tag in (
+            "ruolo_utente",
+            "ruolo_pianificatore",
+            "ruolo_orchestratore",
+            "ruolo_diretto",
+            "ruolo_ricerca",
+            "ruolo_writer",
+            "ruolo_sintesi",
+            "ruolo_script",
+        ):
+            self.output.tag_configure(tag, foreground=palette_log[tag])
+        self.output.tag_configure(
+            "finale", background=palette_log["finale_sfondo"]
+        )
+        self.output.tag_configure(
+            "finale_intestazione",
+            font=("TkDefaultFont", 11, "bold"),
+            foreground=palette_log["finale_intestazione"],
+        )
+        self.output.tag_configure(
+            "errore", background=palette_log["errore_sfondo"]
+        )
+        # Stili del rendering markdown: il testo non viene riscritto, quindi i
+        # delimitatori restano nel buffer e sono solo nascosti (md_delim eliso).
+        self.output.tag_configure("md_h1", font=("TkDefaultFont", 12, "bold"))
+        self.output.tag_configure("md_h2", font=("TkDefaultFont", 11, "bold"))
+        self.output.tag_configure("md_h3", font=("TkDefaultFont", 10, "bold"))
+        self.output.tag_configure(
+            "md_grassetto", font=("TkDefaultFont", 10, "bold")
+        )
+        self.output.tag_configure(
+            "md_corsivo", font=("TkDefaultFont", 10, "italic")
+        )
+        self.output.tag_configure(
+            "md_codice",
+            font=("TkFixedFont", 9),
+            background=palette_log["md_codice_sfondo"],
+        )
+        self.output.tag_configure(
+            "md_marker", foreground=palette_log["md_marker"]
+        )
+        self.output.tag_configure(
+            "md_link", foreground=palette_log["md_link"], underline=True
+        )
+        self.output.tag_configure(
+            "md_hr", foreground=palette_log["md_marker"]
+        )
+        self.output.tag_configure("md_delim", elide=True)
+        # Gli stili di blocco (risposta finale, errori, intestazioni di log)
+        # prevalgono su quelli markdown quando gli intervalli si sovrappongono:
+        # così dentro il blocco verde finale il codice resta monospace ma lo
+        # sfondo del blocco non viene interrotto.
+        for tag in ("intestazione_log", "finale", "finale_intestazione", "errore"):
+            self.output.tag_raise(tag)
         ttk.Label(frame, textvariable=self.stato).grid(
-            row=7, column=0, columnspan=2, sticky=tk.W, pady=(8, 0)
+            row=8, column=0, columnspan=2, sticky=tk.W, pady=(8, 0)
         )
 
     def _mostra_info_strumenti(self) -> None:
@@ -249,6 +506,8 @@ class AgentGUI:
             self.selected_node_key = None
         if not hasattr(self, "timeline_event_sequence"):
             self.timeline_event_sequence = 0
+        if not hasattr(self, "_strumenti_in_corso"):
+            self._strumenti_in_corso = {}
 
     def _pulisci_lista_agenti(self) -> None:
         """Rimuove lo stato della richiesta precedente prima di avviarne una nuova."""
@@ -265,10 +524,17 @@ class AgentGUI:
         self.execution_nodes.clear()
         self.selected_node_key = None
         self.timeline_event_sequence = 0
+        self._strumenti_in_corso.clear()
         for item in self.agent_list.get_children():
             self.agent_list.delete(item)
         if not hasattr(self.agent_list, "heading"):
             return
+        if hasattr(self, "riepilogo_voci"):
+            for label in self.riepilogo_voci.values():
+                label.destroy()
+            self.riepilogo_voci.clear()
+            if hasattr(self, "riepilogo_placeholder"):
+                self.riepilogo_placeholder.pack(fill=tk.X)
         self._azzera_dettaglio_nodo()
         self._nuovo_nodo_esecuzione(
             self.execution_root_id,
@@ -277,17 +543,156 @@ class AgentGUI:
             label="Richiesta",
             status="running",
             timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
+            activity="In attesa della pianificazione…",
         )
 
     def _formatta_stato_compatibile(self, status: str, error: str = "") -> str:
-        """Restituisce una etichetta di stato leggibile per il modello compatibile di test."""
+        """Restituisce una etichetta di stato leggibile per la timeline."""
         if status == "running":
             return "In esecuzione"
         if status == "failed":
             return f"Errore: {error}" if error else "Errore"
         if status == "completed":
             return "Completato"
+        if status == "registered":
+            return "Registrato"
         return status.title()
+
+    def _valori_riga_nodo(self, node: ExecutionNode) -> tuple[str, ...]:
+        """Costruisce la tupla dei valori mostrati nella riga della timeline.
+
+        Il Treeview reale espone quattro colonne (tipo, stato, tempo, attività);
+        i wrapper minimali usati nei test non hanno l'attributo ``heading`` e
+        ricevono il formato compatto a tre valori che riporta lo stato al posto
+        del timestamp, preservando le posizioni attese dalle asserzioni.
+        """
+        stato = self._formatta_stato_compatibile(node.status, node.error)
+        if hasattr(self.agent_list, "heading"):
+            return (node.node_type, stato, node.timestamp, node.activity)
+        return (node.node_type, stato, stato)
+
+    def _nome_strumento_evento(self, event: dict[str, str]) -> str:
+        """Ricava il nome dello strumento da ``tool_name`` o dal testo della chiamata."""
+        name = event.get("tool_name", "").strip()
+        if name:
+            return name
+        message = event.get("message", "")
+        if "(" in message:
+            return message.split("(", 1)[0].strip() or "strumento"
+        return message.strip() or "strumento"
+
+    _ATTIVITA_STATO_LLM = {
+        "llm_request": "In attesa della risposta del modello…",
+        "llm_response": "Valuta la risposta del modello…",
+    }
+
+    def _descrivi_attivita_da_evento(self, event: dict[str, str]) -> str:
+        """Traduce un evento in una frase leggibile sull'attività in corso."""
+        event_type = event.get("type", "")
+        if event_type in {"agent_started", "task_started", "planning_started"}:
+            return "Avvio in corso…"
+        if event_type in {"agent_status", "task_status"}:
+            activity = self._ATTIVITA_STATO_LLM.get(event.get("status", ""), "")
+            if activity:
+                return activity
+            return event.get("message", "").strip() or "Aggiornamento in corso…"
+        if event_type == "tool_selected":
+            return f"Esegue lo strumento {self._nome_strumento_evento(event)}…"
+        if event_type == "tool_result":
+            return f"Strumento completato: {self._nome_strumento_evento(event)}"
+        if event_type == "model_response":
+            return "Elabora la risposta del modello…"
+        if event_type == "agent_retry":
+            return "Nuovo tentativo in corso…"
+        if event_type in {"agent_failed", "task_failed"}:
+            return "Interrotto per errore"
+        return ""
+
+    def _aggiorna_attivita_nodo(self, key: str, attivita: str) -> None:
+        """Aggiorna 'cosa sta facendo adesso' un nodo e i riepiloghi collegati."""
+        self._ensure_execution_state()
+        node = self.execution_nodes.get(key)
+        if node is None:
+            return
+        node.activity = attivita
+        item_id = self.agent_rows.get(key)
+        if item_id is not None:
+            self.agent_list.item(item_id, values=self._valori_riga_nodo(node))
+        if self.selected_node_key in (None, key):
+            self._mostra_dettaglio_nodo(key)
+        self._sincronizza_riepilogo()
+
+    def _icona_nodo_riepilogo(self, node: ExecutionNode) -> str:
+        """Icona sintetica del ruolo per il pannello degli agenti attivi."""
+        if node.node_type == "planner":
+            return "🧭"
+        if node.node_type == "task":
+            return "🔧"
+        label = node.label.lower()
+        if "ricerca" in label:
+            return "🔎"
+        if "creazione file" in label:
+            return "📝"
+        if "sintet" in label:
+            return "🧩"
+        if "diretto" in label:
+            return "🤖"
+        return "⚙️"
+
+    def _sincronizza_riepilogo(self) -> None:
+        """Aggiorna pannello 'Agenti attivi adesso' e barra di stato.
+
+        Le voci derivano sempre dai nodi in esecuzione, così pannello e timeline
+        non possono andare fuori fase; i nodi conclusi spariscono dal pannello
+        mentre restano nella timeline.
+        """
+        self._ensure_execution_state()
+        attivi = [
+            node
+            for node in self.execution_nodes.values()
+            if node.node_type in {"planner", "agente", "task"}
+            and node.status in {"running", "retry"}
+        ]
+        if hasattr(self, "riepilogo_voci"):
+            chiavi_attive = {node.key for node in attivi}
+            for key in list(self.riepilogo_voci):
+                if key not in chiavi_attive:
+                    self.riepilogo_voci.pop(key).destroy()
+            colori = self._PALETTE_RIEPILOGO[getattr(self, "tema_scuro", False)]
+            opzioni: dict[str, object] = {"anchor": tk.W, "justify": tk.LEFT}
+            if getattr(self, "riepilogo_bg", ""):
+                opzioni["background"] = self.riepilogo_bg
+            for node in attivi:
+                testo = (
+                    f"{self._icona_nodo_riepilogo(node)} {node.label} — "
+                    f"{node.activity or 'In lavorazione…'}"
+                )
+                label = self.riepilogo_voci.get(node.key)
+                if label is None:
+                    label = tk.Label(self.riepilogo_frame, **opzioni)
+                    label.pack(fill=tk.X)
+                    self.riepilogo_voci[node.key] = label
+                label.configure(
+                    text=testo,
+                    foreground=colori.get(node.status, colori["default"]),
+                )
+            if hasattr(self, "riepilogo_placeholder"):
+                placeholder_visibile = bool(
+                    self.riepilogo_placeholder.winfo_manager()
+                )
+                if attivi and placeholder_visibile:
+                    self.riepilogo_placeholder.pack_forget()
+                elif not attivi and not placeholder_visibile:
+                    self.riepilogo_placeholder.pack(fill=tk.X)
+        if not hasattr(self, "stato") or not attivi:
+            return
+        if len(attivi) == 1:
+            self.stato.set(
+                f"In esecuzione · {attivi[0].label} — "
+                f"{attivi[0].activity or 'In lavorazione…'}"
+            )
+        else:
+            self.stato.set(f"In esecuzione · {len(attivi)} agenti al lavoro")
 
     def _registra_evento_timeline(self, event: dict[str, str]) -> None:
         """Aggiunge ogni evento ricevuto come voce immutabile della timeline."""
@@ -350,10 +755,13 @@ class AgentGUI:
         ):
             status = "completed"
         else:
-            status = "running"
+            status = "registered"
 
         received_at = datetime.now().astimezone().strftime("%H:%M:%S.%f")
         raw_event = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
+        # Le fasi sono istantanee: non devono restare "In esecuzione" per sempre.
+        # Chi è concluso per natura (completamenti, risposte, risultati) resta
+        # "completed"; tutto il resto è un semplice record cronologico.
         self._nuovo_nodo_esecuzione(
             f"event:{self.timeline_event_sequence}",
             parent_key=parent_key,
@@ -378,8 +786,15 @@ class AgentGUI:
         input_data: str = "",
         output_data: str = "",
         error: str = "",
+        activity: str = "",
     ) -> str:
-        """Crea o aggiorna un nodo nella timeline di esecuzione."""
+        """Crea o aggiorna un nodo nella timeline di esecuzione.
+
+        In aggiornamento i dettagli non passati non cancellano quelli già
+        registrati: un evento di chiusura (per esempio ``task_completed``) non
+        deve far sparire l'input raccolto all'avvio. L'attività corrente viene
+        svuotata automaticamente quando il nodo arriva a uno stato conclusivo.
+        """
         self._ensure_execution_state()
         if parent_key is not None and parent_key not in self.agent_rows:
             parent_key = (
@@ -400,6 +815,7 @@ class AgentGUI:
                 input_data=input_data,
                 output_data=output_data,
                 error=error,
+                activity=activity,
             )
             self.execution_nodes[key] = node
         else:
@@ -408,17 +824,17 @@ class AgentGUI:
             node.label = label
             node.status = status
             node.timestamp = timestamp
-            node.input_data = input_data
-            node.output_data = output_data
-            node.error = error
+            node.input_data = input_data or node.input_data
+            node.output_data = output_data or node.output_data
+            node.error = error or node.error
+            if activity:
+                node.activity = activity
+            elif status in {"completed", "failed"}:
+                node.activity = ""
 
         parent_item = "" if parent_key is None else self.agent_rows.get(parent_key)
         item_id = self.agent_rows.get(key)
-        if hasattr(self.agent_list, "heading"):
-            values = (node_type, self._formatta_stato_compatibile(status, error), timestamp)
-        else:
-            compat_status = self._formatta_stato_compatibile(status, error)
-            values = (node_type, compat_status, compat_status)
+        values = self._valori_riga_nodo(node)
         if item_id is None:
             try:
                 item_id = self.agent_list.insert(
@@ -486,6 +902,7 @@ class AgentGUI:
             f"Nodo: {node.label}",
             f"Tipo: {node.node_type}",
             f"Stato: {node.status}",
+            f"Attività corrente: {node.activity or '—'}",
             f"Tempo: {node.timestamp}",
             "",
             "Input:",
@@ -535,17 +952,12 @@ class AgentGUI:
         existing = self.execution_nodes.get(agent_id)
         node_type = existing.node_type if existing is not None else "agente"
         now_timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
-        if hasattr(self.agent_list, "heading"):
-            shown_state = (
-                f"Errore: {error}" if status == "failed" and error else state_label
-            )
-            values = (node_type, shown_state, now_timestamp)
-        else:
-            shown_state = (
-                f"Errore: {error}" if status == "failed" and error else state_label
-            )
-            values = (node_type, shown_state, shown_state)
         if item_id is None:
+            activity = ""
+            if status == "running":
+                activity = "Avvio in corso…"
+            elif status == "retry":
+                activity = "Nuovo tentativo in corso…"
             item_id = self._nuovo_nodo_esecuzione(
                 agent_id,
                 parent_key=self.execution_root_id,
@@ -554,17 +966,37 @@ class AgentGUI:
                 status=status,
                 timestamp=now_timestamp,
                 error=error,
+                activity=activity,
             )
             self.agent_rows[agent_id] = item_id
         else:
             tag = "retry" if status == "retry" else status
-            self.agent_list.item(item_id, text=title, values=values, tags=(tag,))
             if existing is not None:
                 existing.status = status
                 existing.error = error or existing.error
                 existing.timestamp = now_timestamp
+                if status in {"completed", "failed"}:
+                    existing.activity = ""
+                elif status == "retry":
+                    existing.activity = "Nuovo tentativo in corso…"
+                elif not existing.activity:
+                    existing.activity = "Avvio in corso…"
+                values = self._valori_riga_nodo(existing)
+            else:
+                shown_state = (
+                    f"Errore: {error}"
+                    if status == "failed" and error
+                    else state_label
+                )
+                values = (
+                    (node_type, shown_state, now_timestamp, "")
+                    if hasattr(self.agent_list, "heading")
+                    else (node_type, shown_state, shown_state)
+                )
+            self.agent_list.item(item_id, text=title, values=values, tags=(tag,))
         self.agent_rows[agent_id] = item_id
         self._mostra_dettaglio_nodo(agent_id)
+        self._sincronizza_riepilogo()
 
     def _avvia_da_tastiera(self, _event: tk.Event) -> str:
         """Mappa Ctrl+Invio all'invio del prompt e blocca il newline nel widget."""
@@ -735,11 +1167,17 @@ class AgentGUI:
                                 self._aggiungi_output_etichettato(
                                     failure.role,
                                     f"Fase non riuscita: {failure.error}\n\n",
+                                    variante="errore",
                                 )
+                        self._imposta_stato_agente(
+                            self.execution_root_id,
+                            "Richiesta",
+                            "completed" if status == "Completato" else "failed",
+                        )
                         self._aggiungi_output_etichettato(
-                            "Orchestratore",
-                            "Risultato finale:\n"
-                            f"{answer if answer else '(nessuna sintesi disponibile)'}\n\n",
+                            "Risposta finale",
+                            answer if answer else "(nessuna sintesi disponibile)",
+                            variante="finale",
                         )
                         self.stato.set(status)
                         self.pulsante_avvia.configure(state=tk.NORMAL)
@@ -755,8 +1193,12 @@ class AgentGUI:
                         self._aggiungi_output_etichettato(
                             "Orchestratore",
                             f"Errore durante l'esecuzione: {contenuto}\n\n",
+                            variante="errore",
                         )
                         self._segna_agenti_in_corso_come_errore(error)
+                        self._imposta_stato_agente(
+                            self.execution_root_id, "Richiesta", "failed", error
+                        )
                         self.stato.set("Errore")
                         self.pulsante_avvia.configure(state=tk.NORMAL)
                 except Exception as error:
@@ -805,7 +1247,9 @@ class AgentGUI:
                 status="running",
                 timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
                 input_data=message,
+                activity="Analisi della richiesta…",
             )
+            self._sincronizza_riepilogo()
             self._aggiungi_output_etichettato("Orchestratore", message)
         elif event_type == "agent_started":
             key = agent_id or event.get("role", title)
@@ -834,6 +1278,7 @@ class AgentGUI:
                 self._imposta_stato_agente(node_key, actor, "retry")
             self._aggiungi_output_etichettato(actor, f"Nuovo tentativo: {message}\n\n")
         elif event_type == "mode_selected":
+            self._aggiorna_attivita_nodo(self.execution_root_id, message)
             self._aggiungi_output_etichettato("Orchestratore", f"{message}\n\n")
         elif event_type in {"agent_status", "task_status"}:
             current_status = event.get("status", "update")
@@ -847,18 +1292,9 @@ class AgentGUI:
                 node.timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
                 if message:
                     node.output_data = f"{current_status}: {message}"
-                item_id = self.agent_rows.get(node_key)
-                if item_id is not None and hasattr(self.agent_list, "heading"):
-                    self.agent_list.item(
-                        item_id,
-                        values=(
-                            node.node_type,
-                            self._formatta_stato_compatibile(node.status, node.error),
-                            node.timestamp,
-                        ),
-                    )
-                if self.selected_node_key in (None, node_key):
-                    self._mostra_dettaglio_nodo(node_key)
+                self._aggiorna_attivita_nodo(
+                    node_key, self._descrivi_attivita_da_evento(event)
+                )
             self._aggiungi_output_etichettato(
                 actor_name,
                 f"{label}: {current_status} · {message}\n\n",
@@ -882,7 +1318,9 @@ class AgentGUI:
                 status="running",
                 timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
                 input_data=message or f"Task avviato: {title}",
+                activity="Avvio in corso…",
             )
+            self._sincronizza_riepilogo()
             self._aggiungi_output_etichettato(actor, f"Attività avviata: {title}\n")
         elif event_type == "task_completed":
             task_key = f"task:{event.get('task_id', title)}"
@@ -900,6 +1338,7 @@ class AgentGUI:
                 timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
                 output_data=message,
             )
+            self._sincronizza_riepilogo()
             self._aggiungi_output_etichettato(actor, f"Attività completata: {title}\n{message}\n\n")
         elif event_type == "task_failed":
             task_key = f"task:{event.get('task_id', title)}"
@@ -918,17 +1357,26 @@ class AgentGUI:
                 timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
                 error=error,
             )
+            self._sincronizza_riepilogo()
             self._aggiungi_output_etichettato(actor, f"Attività non riuscita: {title}\n{error}\n\n")
         elif event_type == "synthesis_started":
             self.stato.set("Sintesi dei risultati...")
+            self._aggiorna_attivita_nodo(
+                self.execution_root_id, "Sintesi dei risultati in corso…"
+            )
             self._aggiungi_output_etichettato("Agente sintetizzatore", message)
         elif event_type == "model_response":
+            node_key = f"task:{task_id}" if task_id else agent_id
+            if node_key:
+                self._aggiorna_attivita_nodo(
+                    node_key, "Elabora la risposta del modello…"
+                )
             self._aggiungi_output_etichettato(
                 actor,
                 f"Risposta del modello:\n{message}\n\n",
             )
         elif event_type == "tool_result":
-            tool_key = f"tool:{event.get('tool_name', title)}:{datetime.now().astimezone().strftime('%H:%M:%S.%f')}"
+            strumento = self._nome_strumento_evento(event)
             task_key = f"task:{task_id}" if task_id else ""
             parent_key = (
                 task_key
@@ -937,19 +1385,34 @@ class AgentGUI:
                 if agent_id in self.agent_rows
                 else self.execution_root_id
             )
+            # Se lo stesso strumento è in attesa dallo stesso padre, il risultato
+            # aggiorna il nodo aperto: altrimenti resterebbe una riga tool con
+            # stato 'In esecuzione' senza alcuna chiusura.
+            chiave_aperta = self._strumenti_in_corso.pop((parent_key, strumento), None)
+            if chiave_aperta is not None and chiave_aperta in self.execution_nodes:
+                tool_key = chiave_aperta
+            else:
+                tool_key = (
+                    f"tool:{strumento}:"
+                    f"{datetime.now().astimezone().strftime('%H:%M:%S.%f')}"
+                )
             self._nuovo_nodo_esecuzione(
                 tool_key,
                 parent_key=parent_key,
                 node_type="tool",
-                label=event.get('tool_name', title),
+                label=strumento,
                 status="completed",
                 timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
                 output_data=message,
             )
-            tool_actor = f"{actor} · {event.get('tool_name', title)}" if agent_id else actor
+            if parent_key:
+                self._aggiorna_attivita_nodo(
+                    parent_key, f"Strumento completato: {strumento}"
+                )
+            tool_actor = f"{actor} · {strumento}" if agent_id else actor
             self._aggiungi_output_etichettato(tool_actor, f"Risultato strumento: {message}\n")
         elif event_type == "tool_selected":
-            tool_key = f"tool:{event.get('tool_name', title)}:{datetime.now().astimezone().strftime('%H:%M:%S.%f')}"
+            strumento = self._nome_strumento_evento(event)
             task_key = f"task:{task_id}" if task_id else ""
             parent_key = (
                 task_key
@@ -958,15 +1421,25 @@ class AgentGUI:
                 if agent_id in self.agent_rows
                 else self.execution_root_id
             )
+            tool_key = (
+                f"tool:{strumento}:"
+                f"{datetime.now().astimezone().strftime('%H:%M:%S.%f')}"
+            )
             self._nuovo_nodo_esecuzione(
                 tool_key,
                 parent_key=parent_key,
                 node_type="tool",
-                label=event.get('tool_name', title),
+                label=strumento,
                 status="running",
                 timestamp=datetime.now().astimezone().strftime("%H:%M:%S"),
                 input_data=message,
+                activity="In esecuzione…",
             )
+            self._strumenti_in_corso[(parent_key, strumento)] = tool_key
+            if parent_key:
+                self._aggiorna_attivita_nodo(
+                    parent_key, f"Esegue lo strumento {strumento}…"
+                )
             self._aggiungi_output_etichettato(actor, f"Azione selezionata: {message}\n")
         else:
             self._aggiungi_output_etichettato("Orchestratore", f"Evento non riconosciuto: {event}\n")
@@ -987,15 +1460,76 @@ class AgentGUI:
                 continue
             self._imposta_stato_agente(key, node.label, "failed", error)
 
+    # Intestazioni del log colorate per ruolo, così si riconosce subito chi
+    # parla; i nomi vanno confrontati per prefisso, come per le icone.
+    _RUOLI_LOG = (
+        ("Utente", "ruolo_utente"),
+        ("Pianificatore", "ruolo_pianificatore"),
+        ("Orchestratore", "ruolo_orchestratore"),
+        ("Agente diretto", "ruolo_diretto"),
+        ("Agente di ricerca", "ruolo_ricerca"),
+        ("Agente creazione file", "ruolo_writer"),
+        ("Agente di creazione file", "ruolo_writer"),
+        ("Agente sintetizzatore", "ruolo_sintesi"),
+        ("Script", "ruolo_script"),
+    )
+
     def _aggiungi_output(self, testo: str) -> None:
-        """Accoda testo al log e scorre automaticamente all'ultima riga."""
+        """Accoda testo al log, applica lo stile del blocco e scorre in fondo."""
+        tag_info = self._tag_blocco_pendente
+        self._tag_blocco_pendente = None
         self.output.configure(state=tk.NORMAL)
+        inizio = self.output.index("end-1c")
         self.output.insert(tk.END, testo)
+        fine = self.output.index("end-1c")
+        self._applica_stili_blocco(inizio, fine, tag_info)
+        self._applica_markdown(inizio, fine)
         self.output.see(tk.END)
         self.output.configure(state=tk.DISABLED)
 
-    def _aggiungi_output_etichettato(self, agente: str, testo: str) -> None:
-        """Aggiunge un blocco leggibile con icona, data, ora e autore."""
+    def _applica_markdown(self, inizio: str, fine: str) -> None:
+        """Applica lo stile markdown al corpo del blocco, sotto l'intestazione."""
+        linea_base = int(float(inizio))
+        corpo = self.output.get(f"{linea_base + 1}.0", f"{fine} lineend")
+        for indice, col_inizio, col_fine, tag in _spazi_markdown(corpo.split("\n")):
+            riga = linea_base + 1 + indice
+            self.output.tag_add(
+                tag,
+                f"{riga}.{col_inizio}",
+                f"{riga}.0 lineend" if col_fine == "lineend" else f"{riga}.{col_fine}",
+            )
+
+    def _applica_stili_blocco(
+        self, inizio: str, fine: str, tag_info: dict[str, str] | None
+    ) -> None:
+        """Colora intestazione e corpo del blocco appena inserito nel log."""
+        if tag_info is None:
+            return
+        variante = tag_info.get("variante", "normale")
+        if variante == "finale":
+            self.output.tag_add("finale", inizio, fine)
+            self.output.tag_add("finale_intestazione", inizio, f"{inizio} lineend")
+            return
+        if variante == "errore":
+            self.output.tag_add("errore", inizio, fine)
+        self.output.tag_add("intestazione_log", inizio, f"{inizio} lineend")
+        tag_ruolo = next(
+            (tag for name, tag in self._RUOLI_LOG
+             if tag_info.get("agente", "").startswith(name)),
+            None,
+        )
+        if tag_ruolo:
+            self.output.tag_add(tag_ruolo, inizio, f"{inizio} lineend")
+
+    def _aggiungi_output_etichettato(
+        self, agente: str, testo: str, *, variante: str = "normale"
+    ) -> None:
+        """Aggiunge un blocco leggibile con icona, data, ora e autore.
+
+        ``variante`` controlla solo lo stile visivo del blocco: "finale" ed
+        "errore" evidenziano la risposta conclusiva e i fallimenti rispetto al
+        normale flusso di eventi intermedi.
+        """
         icons = (
             ("Utente", "💬"),
             ("Pianificatore", "🧭"),
@@ -1004,6 +1538,7 @@ class AgentGUI:
             ("Agente creazione file", "📝"),
             ("Agente di creazione file", "📝"),
             ("Agente sintetizzatore", "🧩"),
+            ("Risposta finale", "✅"),
             ("Script", "💻"),
         )
         icon = next(
@@ -1013,6 +1548,7 @@ class AgentGUI:
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
         lines = testo.strip().splitlines() or [""]
         description = "\n".join(f"   {line}" for line in lines)
+        self._tag_blocco_pendente = {"agente": agente, "variante": variante}
         self._aggiungi_output(
             f"{icon} {timestamp} · {agente}\n{description}\n\n"
         )

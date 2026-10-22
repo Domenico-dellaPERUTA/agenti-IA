@@ -370,7 +370,9 @@ class GuiAgentStatusTests(unittest.TestCase):
         self.assertEqual(nodes["execution-root"].node_type, "request")
         for key, node in nodes.items():
             if key.startswith("event:") or key.startswith("tool:"):
-                self.assertEqual(node.status, "running", f"{key} non dovrebbe fallire")
+                self.assertNotEqual(
+                    node.status, "failed", f"{key} non dovrebbe fallire"
+                )
         # Solo agente e task in running devono essere marcati failed.
         self.assertEqual(nodes["planner"].status, "failed")
         self.assertEqual(nodes["planner"].node_type, "agente")
@@ -457,6 +459,134 @@ class GuiAgentStatusTests(unittest.TestCase):
         self.assertGreaterEqual(node.timestamp, started_at)
         item_id = self.gui.agent_rows["direct"]
         self.assertEqual(self.gui.agent_list.item(item_id, "values")[1], "Completato")
+
+    def test_tool_result_closes_the_matching_open_tool_node(self):
+        self.gui._pulisci_lista_agenti()
+        self.gui._gestisci_evento_orchestratore(
+            {"type": "agent_started", "agent_id": "direct", "title": "Agente diretto"}
+        )
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "tool_selected",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "message": "read_file_excerpt({'path': 'note.txt'})",
+            }
+        )
+        tool_key = next(key for key in self.gui.agent_rows if key.startswith("tool:"))
+
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "tool_result",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "tool_name": "read_file_excerpt",
+                "message": "contenuto del file",
+            }
+        )
+
+        # Il risultato aggiorna il nodo aperto: niente riga tool doppia e lo
+        # stato passa a completato, così non resta "In esecuzione" in eterno.
+        tool_keys = [key for key in self.gui.agent_rows if key.startswith("tool:")]
+        self.assertEqual(tool_keys, [tool_key])
+        node = self.gui.execution_nodes[tool_key]
+        self.assertEqual(node.status, "completed")
+        self.assertIn("read_file_excerpt", node.input_data)
+        self.assertEqual(node.output_data, "contenuto del file")
+        self.assertEqual(node.activity, "")
+
+    def test_instantaneous_phases_are_registered_not_running(self):
+        self.gui._pulisci_lista_agenti()
+        self.gui._gestisci_evento_orchestratore(
+            {"type": "mode_selected", "message": "Esecuzione diretta"}
+        )
+
+        node = next(
+            node
+            for key, node in self.gui.execution_nodes.items()
+            if key.startswith("event:")
+        )
+        self.assertEqual(node.status, "registered")
+        self.assertEqual(
+            self.gui._formatta_stato_compatibile(node.status), "Registrato"
+        )
+
+    def test_new_request_clears_pending_tool_nodes(self):
+        self.gui._pulisci_lista_agenti()
+        self.gui._gestisci_evento_orchestratore(
+            {"type": "agent_started", "agent_id": "direct", "title": "Agente diretto"}
+        )
+        self.gui._gestisci_evento_orchestratore(
+            {
+                "type": "tool",
+                "agent_id": "direct",
+                "title": "Agente diretto",
+                "message": "list_files({})",
+            }
+        )
+
+        self.gui._pulisci_lista_agenti()
+
+        self.assertEqual(self.gui._strumenti_in_corso, {})
+
+
+from agente_gui import _spazi_markdown
+
+
+class GuiMarkdownTests(unittest.TestCase):
+    @staticmethod
+    def _tag_per_linea(spazi, indice=0):
+        return [(c1, c2, tag) for riga, c1, c2, tag in spazi if riga == indice]
+
+    def test_riga_senza_markup_non_produce_spazi(self):
+        self.assertEqual(_spazi_markdown(["nessun formato qui"]), [])
+
+    def test_intestazione_livello_due_elide_i_cancelletti(self):
+        spazi = self._tag_per_linea(_spazi_markdown(["## Titolo"]))
+        self.assertIn((0, 3, "md_delim"), spazi)
+        self.assertIn((3, "lineend", "md_h2"), spazi)
+
+    def test_grassetto_evidenziato_e_delimitatori_elisi(self):
+        # "testo **forte** ok": il grassetto copre "forte", i ** spariscono.
+        spazi = self._tag_per_linea(_spazi_markdown(["testo **forte** ok"]))
+        self.assertIn((8, 13, "md_grassetto"), spazi)
+        self.assertEqual(
+            [s for s in spazi if s[2] == "md_delim"], [(6, 8, "md_delim"), (13, 15, "md_delim")]
+        )
+
+    def test_blocco_codice_delimitato_da_fence(self):
+        spazi = _spazi_markdown(["```", "print(1)", "```"])
+        self.assertEqual(
+            self._tag_per_linea(spazi, 1), [(0, "lineend", "md_codice")]
+        )
+        self.assertEqual(
+            self._tag_per_linea(spazi, 0), [(0, "lineend", "md_delim")]
+        )
+        self.assertEqual(
+            self._tag_per_linea(spazi, 2), [(0, "lineend", "md_delim")]
+        )
+
+    def test_codice_inline(self):
+        spazi = self._tag_per_linea(_spazi_markdown(["digita `ls -l` ora"]))
+        self.assertIn((8, 13, "md_codice"), spazi)
+
+    def test_marker_elenco_puntato_e_numerato(self):
+        spazi = self._tag_per_linea(_spazi_markdown(["  - voce"]))
+        self.assertIn((2, 3, "md_marker"), spazi)
+        spazi_numerati = self._tag_per_linea(_spazi_markdown(["3. voce"]))
+        self.assertIn((0, 2, "md_marker"), spazi_numerati)
+
+    def test_link_mostra_testo_ed_elide_url(self):
+        # "vedi [sito](https://esempio.it).": visibile solo 'sito' con md_link.
+        spazi = self._tag_per_linea(
+            _spazi_markdown(["vedi [sito](https://esempio.it)."])
+        )
+        self.assertIn((6, 10, "md_link"), spazi)
+        self.assertIn((10, 31, "md_delim"), spazi)
+
+    def test_corsivo(self):
+        spazi = self._tag_per_linea(_spazi_markdown(["un *tocco* di stile"]))
+        self.assertIn((4, 9, "md_corsivo"), spazi)
 
 
 if __name__ == "__main__":
