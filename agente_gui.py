@@ -41,7 +41,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from AI import LLMProvider, OrchestrationResult
-from AI import AI
+from AI import AI, LOGO_ASCII, TAGLINE
 from AI.provider_setup import (
     SCHEDE_PROVIDER,
     crea_provider,
@@ -353,41 +353,76 @@ class AgentGUI:
         self.window.after(100, self._leggi_eventi)
 
     def _crea_interfaccia(self) -> None:
-        """Costruisce i controlli Tk e collega widget a callback dell'app."""
+        """Costruisce i controlli Tk e collega widget a callback dell'app.
+
+        Layout compatto: sandbox, selezione cartella e info strumenti su una
+        sola riga; la timeline di esecuzione è richiudibile con un pulsante
+        (nascosta di default) e il log vive in un riquadro con titolo proprio,
+        così resta l'elemento dominante della finestra.
+        """
         self.tema_scuro = self._rileva_tema_scuro(self.window)
-        frame = ttk.Frame(self.window, padding=12)
+        palette_log = self._PALETTE_LOG[self.tema_scuro]
+        palette_stati = self._PALETTE_TIMELINE[self.tema_scuro]
+
+        # Intestazione con marchio: il logo è ASCII puro e va mostrato in un
+        # vero font monospace a corpo generoso (TkFixedFont ha glifi troppo
+        # piccoli). I margini a due valori vanno in pack()/grid(), non nel
+        # costruttore di un widget classico.
+        try:
+            famiglie = set(
+                self.window.tk.splitlist(self.window.tk.call("font", "families"))
+            )
+        except tk.TclError:
+            famiglie = set()
+        famiglia_logo = next(
+            (f for f in ("Menlo", "Courier New", "Courier") if f in famiglie),
+            "TkFixedFont",
+        )
+        header = tk.Frame(self.window)
+        header.pack(fill=tk.X, padx=12, pady=(8, 2))
+        tk.Label(
+            header,
+            text=LOGO_ASCII,
+            font=(famiglia_logo, 12, "bold"),
+            justify=tk.LEFT,
+            anchor=tk.W,
+            foreground=palette_log["ruolo_pianificatore"],
+        ).pack(fill=tk.X)
+        tk.Label(
+            header,
+            text=TAGLINE,
+            anchor=tk.W,
+            foreground=palette_stati["registered"],
+        ).pack(fill=tk.X, pady=(2, 0))
+
+        frame = ttk.Frame(self.window, padding=(12, 4, 12, 12))
         frame.pack(fill=tk.BOTH, expand=True)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(8, weight=1)
+        frame.rowconfigure(7, weight=1)  # solo la zona log cresce in verticale
 
-        ttk.Label(frame, text="Cartella sandbox").grid(
+        # Tutto su una riga: etichetta, percorso sandbox e pulsanti.
+        riga_sandbox = ttk.Frame(frame)
+        riga_sandbox.grid(row=0, column=0, columnspan=2, sticky=tk.EW, pady=(0, 6))
+        riga_sandbox.columnconfigure(1, weight=1)
+        ttk.Label(riga_sandbox, text="Cartella sandbox").grid(
             row=0, column=0, sticky=tk.W
         )
-        ttk.Entry(frame, textvariable=self.cartella_sandbox).grid(
-            row=1, column=0, sticky=tk.EW, pady=(4, 8)
+        ttk.Entry(riga_sandbox, textvariable=self.cartella_sandbox).grid(
+            row=0, column=1, sticky=tk.EW, padx=(8, 8)
         )
-        ttk.Button(frame, text="Seleziona cartella", command=self._seleziona_cartella).grid(
-            row=1, column=1, padx=(8, 0), pady=(4, 8)
-        )
+        ttk.Button(
+            riga_sandbox, text="Seleziona cartella", command=self._seleziona_cartella
+        ).grid(row=0, column=2)
+        ttk.Button(
+            riga_sandbox, text="ⓘ Info strumenti", command=self._mostra_info_strumenti
+        ).grid(row=0, column=3, padx=(6, 0))
 
         self._crea_pannello_provider(frame)
 
-        info_frame = ttk.Frame(frame)
-        info_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
-        ttk.Label(
-            info_frame,
-            text="Azioni disponibili all'agente",
-        ).pack(side=tk.LEFT)
-        ttk.Button(
-            info_frame,
-            text="ⓘ Info strumenti",
-            command=self._mostra_info_strumenti,
-        ).pack(side=tk.LEFT, padx=(8, 0))
-
         riepilogo_frame = ttk.LabelFrame(
-            frame, text="Agenti attivi adesso", padding=(8, 6)
+            frame, text="Agenti attivi adesso", padding=(8, 4)
         )
-        riepilogo_frame.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+        riepilogo_frame.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(0, 6))
         self.riepilogo_frame = riepilogo_frame
         try:
             self.riepilogo_bg: str = ttk.Style(self.window).lookup(
@@ -408,10 +443,23 @@ class AgentGUI:
         )
         self.riepilogo_placeholder.pack(fill=tk.X)
 
-        agent_frame = ttk.LabelFrame(frame, text="Timeline di esecuzione", padding=6)
-        agent_frame.grid(row=5, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
+        # Timeline richiudibile: nascosta di default, si apre col pulsante.
+        self._timeline_visibile = False
+        self.pulsante_timeline = ttk.Button(
+            frame, text="▶ Timeline di esecuzione", command=self._commuta_timeline
+        )
+        self.pulsante_timeline.grid(row=3, column=0, sticky=tk.W, pady=(0, 6))
+
+        self.agent_frame = ttk.LabelFrame(
+            frame, text="Timeline di esecuzione", padding=6
+        )
+        # posizione riservata: la riga viene occupata solo quando visibile
+        self._timeline_layout = dict(
+            row=4, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8)
+        )
+        agent_frame = self.agent_frame
         agent_frame.columnconfigure(0, weight=3)
-        agent_frame.columnconfigure(1, weight=2)
+        agent_frame.columnconfigure(2, weight=2)
         agent_frame.rowconfigure(0, weight=1)
 
         self.agent_list = ttk.Treeview(
@@ -430,8 +478,7 @@ class AgentGUI:
         self.agent_list.column("stato", width=120, minwidth=100, stretch=False)
         self.agent_list.column("tempo", width=100, minwidth=80, stretch=False)
         self.agent_list.column("attivita", width=200, minwidth=140, stretch=True)
-        colori_timeline = self._PALETTE_TIMELINE[self.tema_scuro]
-        for stato, colore in colori_timeline.items():
+        for stato, colore in palette_stati.items():
             self.agent_list.tag_configure(stato, foreground=colore)
         self.agent_list.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 8))
         self.agent_list.bind("<<TreeviewSelect>>", self._aggiorna_dettaglio_nodo)
@@ -448,36 +495,45 @@ class AgentGUI:
         self.node_details.grid(row=0, column=2, sticky=tk.NSEW)
 
         ttk.Label(frame, text="Richiesta per l'agente").grid(
-            row=6, column=0, columnspan=2, sticky=tk.W
+            row=5, column=0, columnspan=2, sticky=tk.W
         )
-        self.prompt = tk.Text(frame, height=8, wrap=tk.WORD)
-        self.prompt.grid(row=7, column=0, columnspan=2, sticky=tk.EW, pady=(4, 8))
+        self.prompt = tk.Text(frame, height=4, wrap=tk.WORD)
+        self.prompt.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(4, 6))
         self.prompt.insert("1.0", self.initial_prompt)
         self.prompt.bind("<Control-Return>", self._avvia_da_tastiera)
 
         controls = ttk.Frame(frame)
-        controls.grid(row=8, column=0, columnspan=2, sticky=tk.NSEW)
+        controls.grid(row=7, column=0, columnspan=2, sticky=tk.NSEW)
         controls.columnconfigure(0, weight=1)
         controls.rowconfigure(1, weight=1)
         self.pulsante_avvia = ttk.Button(
             controls, text="Invia richiesta al modello", command=self._avvia_agente
         )
-        self.pulsante_avvia.grid(row=0, column=0, sticky=tk.W, pady=(0, 8))
+        self.pulsante_avvia.grid(row=0, column=0, sticky=tk.W, pady=(0, 6))
         ttk.Label(
             controls, text="Premi Ctrl+Invio per inviare"
-        ).grid(row=0, column=1, sticky=tk.E, pady=(0, 8))
+        ).grid(row=0, column=1, sticky=tk.E, pady=(0, 6))
 
-        self.output = scrolledtext.ScrolledText(
-            controls, wrap=tk.WORD, state=tk.DISABLED, height=18
+        log_frame = ttk.LabelFrame(
+            controls, text="Log eventi e risposta", padding=4
         )
-        self.output.grid(row=1, column=0, columnspan=2, sticky=tk.NSEW)
+        log_frame.grid(row=1, column=0, columnspan=2, sticky=tk.NSEW)
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+        self.output = scrolledtext.ScrolledText(
+            log_frame,
+            wrap=tk.WORD,
+            state=tk.DISABLED,
+            height=18,
+            font=("TkDefaultFont", 11),
+        )
+        self.output.grid(row=0, column=0, sticky=tk.NSEW)
         # Stili del log: intestazioni colorate per ruolo e blocchi marcati per
         # la risposta finale e gli errori, così sono distinguibili a colpo d'occhio.
         # I colori vengono dalla palette coerente con il tema (chiaro/scuro)
         # rilevato sullo sfondo reale del widget all'avvio.
-        palette_log = self._PALETTE_LOG[self.tema_scuro]
         self.output.tag_configure(
-            "intestazione_log", font=("TkDefaultFont", 10, "bold")
+            "intestazione_log", font=("TkDefaultFont", 11, "bold")
         )
         for tag in (
             "ruolo_utente",
@@ -495,7 +551,7 @@ class AgentGUI:
         )
         self.output.tag_configure(
             "finale_intestazione",
-            font=("TkDefaultFont", 11, "bold"),
+            font=("TkDefaultFont", 12, "bold"),
             foreground=palette_log["finale_intestazione"],
         )
         self.output.tag_configure(
@@ -503,18 +559,18 @@ class AgentGUI:
         )
         # Stili del rendering markdown: il testo non viene riscritto, quindi i
         # delimitatori restano nel buffer e sono solo nascosti (md_delim eliso).
-        self.output.tag_configure("md_h1", font=("TkDefaultFont", 12, "bold"))
-        self.output.tag_configure("md_h2", font=("TkDefaultFont", 11, "bold"))
-        self.output.tag_configure("md_h3", font=("TkDefaultFont", 10, "bold"))
+        self.output.tag_configure("md_h1", font=("TkDefaultFont", 13, "bold"))
+        self.output.tag_configure("md_h2", font=("TkDefaultFont", 12, "bold"))
+        self.output.tag_configure("md_h3", font=("TkDefaultFont", 11, "bold"))
         self.output.tag_configure(
-            "md_grassetto", font=("TkDefaultFont", 10, "bold")
+            "md_grassetto", font=("TkDefaultFont", 11, "bold")
         )
         self.output.tag_configure(
-            "md_corsivo", font=("TkDefaultFont", 10, "italic")
+            "md_corsivo", font=("TkDefaultFont", 11, "italic")
         )
         self.output.tag_configure(
             "md_codice",
-            font=("TkFixedFont", 9),
+            font=("TkFixedFont", 10),
             background=palette_log["md_codice_sfondo"],
         )
         self.output.tag_configure(
@@ -541,8 +597,18 @@ class AgentGUI:
         for tag in ("intestazione_log", "finale", "finale_intestazione", "errore"):
             self.output.tag_raise(tag)
         ttk.Label(frame, textvariable=self.stato).grid(
-            row=9, column=0, columnspan=2, sticky=tk.W, pady=(8, 0)
+            row=8, column=0, columnspan=2, sticky=tk.W, pady=(8, 0)
         )
+
+    def _commuta_timeline(self) -> None:
+        """Mostra o nasconde la timeline di esecuzione su richiesta."""
+        self._timeline_visibile = not self._timeline_visibile
+        if self._timeline_visibile:
+            self.agent_frame.grid(**self._timeline_layout)
+            self.pulsante_timeline.configure(text="▼ Timeline di esecuzione")
+        else:
+            self.agent_frame.grid_remove()
+            self.pulsante_timeline.configure(text="▶ Timeline di esecuzione")
 
     def _mostra_info_strumenti(self) -> None:
         """Mostra descrizione degli strumenti e delle relative cautele."""
@@ -574,7 +640,7 @@ class AgentGUI:
         modelli dell'endpoint e popola la combobox della scheda.
         """
         provider_frame = ttk.LabelFrame(frame, text="Modello AI", padding=(8, 6))
-        provider_frame.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+        provider_frame.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(0, 6))
         self.notebook_provider = ttk.Notebook(provider_frame)
         self.notebook_provider.pack(fill=tk.X)
         self._schede_provider: list[str] = []

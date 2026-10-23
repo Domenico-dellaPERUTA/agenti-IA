@@ -926,5 +926,39 @@ class GuiProviderTests(unittest.TestCase):
         self.assertEqual(provider.host, "http://192.168.1.4:11434")
 
 
+class TimelineRichiudibileTests(unittest.TestCase):
+    def test_il_pulsante_apre_e_chiude_la_timeline(self):
+        class FakeFrameGriglia:
+            def __init__(self):
+                self.visibile = False
+
+            def grid(self, **_kw):
+                self.visibile = True
+
+            def grid_remove(self):
+                self.visibile = False
+
+        class FakePulsante:
+            def __init__(self):
+                self.testo = None
+
+            def configure(self, **kw):
+                self.testo = kw.get("text", self.testo)
+
+        gui = AgentGUI.__new__(AgentGUI)
+        gui.agent_frame = FakeFrameGriglia()
+        gui.pulsante_timeline = FakePulsante()
+        gui._timeline_visibile = False
+        gui._timeline_layout = {"row": 4}
+
+        gui._commuta_timeline()
+        self.assertTrue(gui.agent_frame.visibile)
+        self.assertEqual(gui.pulsante_timeline.testo, "▼ Timeline di esecuzione")
+
+        gui._commuta_timeline()
+        self.assertFalse(gui.agent_frame.visibile)
+        self.assertEqual(gui.pulsante_timeline.testo, "▶ Timeline di esecuzione")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ Gli import qui raccolti permettono di costruire un agente con
 ``from AI import Agent, LMStudioProvider`` senza conoscere i moduli interni.
 """
 
+from .branding import LOGO_ASCII, TAGLINE
 from .core import Agent, LLMProvider, LLMResponse, ToolCall, ToolExecutionError
 from .orchestration import (
     AgentOrchestrator,
@@ -26,6 +27,8 @@ from .application import AI
 # ``__all__`` documenta i nomi supportati dall'importazione pubblica ``AI.*``.
 __all__ = [
     "Agent",
+    "LOGO_ASCII",
+    "TAGLINE",
     "AgentOrchestrator",
     "AI",
     "InternetAccess",

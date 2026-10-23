@@ -7,6 +7,7 @@ from unittest import mock
 
 import agente
 from AI import LLMProvider
+from AI.branding import LOGO_ASCII, TAGLINE
 from AI.provider_setup import (
     crea_provider,
     descrivi_provider,
@@ -278,6 +279,32 @@ class LoopReplTests(unittest.TestCase):
 
         self.assertEqual(orchestratore.run.call_count, 0)
         self.assertIn("Fine dell'input", output)
+
+
+class BrandingTests(unittest.TestCase):
+    def test_logo_e_ascii_puro_multilinea_e_riconoscibile(self):
+        from AI.branding import LOGO_ASCII, TAGLINE
+
+        righe = LOGO_ASCII.split("\n")
+        self.assertGreaterEqual(len(righe), 5)
+        self.assertTrue(all(ord(c) < 128 for c in LOGO_ASCII))
+        self.assertLessEqual(max(len(r) for r in righe), 80)
+        self.assertTrue(any("/  _/" in riga for riga in righe))  # scritta IA
+        self.assertIn("sandbox", TAGLINE)
+
+    def test_cli_mostra_il_logo_all_avvio(self):
+        _, output = LoopReplTests()._esegui_main(["esci"], self._risultato_repl())
+
+        self.assertIn(LOGO_ASCII.split("\n")[0], output)
+        self.assertIn("orchestratore multi-agente", output)
+
+    @staticmethod
+    def _risultato_repl():
+        risultato = mock.MagicMock()
+        risultato.answer = "ok"
+        risultato.failures = []
+        risultato.tasks = []
+        return risultato
 
 
 if __name__ == "__main__":

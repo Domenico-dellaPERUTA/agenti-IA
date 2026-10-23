@@ -134,6 +134,10 @@ robusto e interessante per uso di laboratorio e per prototipi funzionali.
     fasi in errore invece di un generico «(nessuna sintesi disponibile)» verde,
     e i ruoli interni (planner, direct, …) sono mostrati con nomi leggibili
     (`_NOMI_RUOLI_FASE`) così icone e colori dei blocchi restano coerenti.
+  - Attenzione ai widget classici Tk: nel costruttore opzioni come
+    `padx`/`pady` accettano una distanza singola, mentre i margini a due
+    valori vanno passati a `pack()`/`grid()` — Tk rifiuta tuple nel
+    costruttore con `TclError: bad screen distance`.
 
 - Pannello «Modello AI» nella GUI con una scheda per provider (LM Studio,
   Ollama, OpenAI): il provider viene creato a ogni invio dalla scheda attiva,
@@ -527,12 +531,14 @@ Il provider selezionato vale dal prossimo invio e non viene salvato su disco
 (la chiave API OpenAI resta in memoria o viene letta da `OPENAI_API_KEY`).
 La sandbox predefinita è
 `sandbox/` nella cartella del progetto. Il pulsante **Info strumenti** descrive
-le azioni disponibili e le relative cautele; la timeline degli agenti mostra in
-tempo reale pianificatore, worker e sintetizzatore con un indicatore colorato
-per stato e una colonna «Attività corrente» che descrive il lavoro in corso di
-ogni nodo; il pannello **Agenti attivi adesso** riepiloga chi sta lavorando e
-cosa sta facendo, e nel log la risposta finale è evidenziata rispetto agli
-eventi intermedi. Se l'agente propone di eseguire uno
+le azioni disponibili e le relative cautele; il layout è compatto (sandbox,
+selezione e info sulla stessa riga) perché il log eventi, incorniciato nel
+riquadro «Log eventi e risposta», domini la finestra; la timeline degli
+agenti — con indicatore colorato per stato e colonna «Attività corrente» — è
+richiudibile e si apre con il pulsante **▶ Timeline di esecuzione**; il
+pannello **Agenti attivi adesso** riepiloga chi sta lavorando e cosa sta
+facendo, e nel log la risposta finale è evidenziata rispetto agli eventi
+intermedi. Se l'agente propone di eseguire uno
 script Bash, la GUI mostra il contenuto completo e avvisa che lo script opera
 con i privilegi dell'utente corrente; si può approvare o annullare. Lo script
 temporaneo e i file temporanei destinati al comando vengono eliminati al
@@ -607,6 +613,7 @@ risposte di rete e del modello sono simulate nei test.
 ├── requirements.txt
 ├── AI/
 │   ├── __init__.py
+│   ├── branding.py
 │   ├── core.py
 │   ├── orchestration.py
 │   ├── provider_setup.py
@@ -649,6 +656,9 @@ risposte di rete e del modello sono simulate nei test.
 - [`AI/provider_setup.py`](./AI/provider_setup.py): regole condivise per la
   selezione del provider da GUI e CLI: predefiniti delle schede, factory con
   validazione, elenco dei modelli del server e descrizione per il log.
+- [`AI/branding.py`](./AI/branding.py): logo ASCII e tagline dell'applicazione,
+  mostrati in testata dalla GUI e all'avvio della CLI. Il marchio è ASCII puro,
+  quindi si vede correttamente in ogni terminale anche senza Unicode.
 - [`AI/web.py`](./AI/web.py): ricerca e lettura web in sola lettura.
 - [`sandbox/note.txt`](./sandbox/note.txt): esempio di testo utilizzabile
   dall'agente. Altri file in `sandbox/` sono dati locali e possono variare da

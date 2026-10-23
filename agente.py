@@ -8,7 +8,7 @@ import getpass
 import sys
 import threading
 
-from AI import AI
+from AI import AI, LOGO_ASCII, TAGLINE
 from AI.provider_setup import (
     MODELLI_PREDEFINITI_OPENAI,
     SCHEDE_PROVIDER,
@@ -137,6 +137,8 @@ def main() -> None:
     INITIAL_PROMPT = (
         "Elenca i file disponibili nella sandbox e dimmi cosa contiene note.txt."
     )
+    print(LOGO_ASCII)
+    print(f"   {TAGLINE}\n")
     # Fase di configurazione guidata del provider; se l'input non è un
     # terminale interattivo (pipeline, redirect) si usano i predefiniti.
     if sys.stdin.isatty():
