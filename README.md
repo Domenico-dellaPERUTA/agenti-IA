@@ -7,7 +7,11 @@ registrare strumenti utilizzabili dagli agenti e, facoltativamente, lavorare
 con file entro una cartella sandbox o consultare pagine web pubbliche.
 
 Il progetto include anche una GUI e una CLI dimostrative, utili come esempi di
-integrazione della libreria in applicazioni e strumenti futuri. Attualmente sono configurate per funzionare com LM Studio con il modello "qwen3-4b-2507", quindi è opportuno cambiare il codice per poterlo collegare correttamente al proprio modello remoto/locale.
+integrazione della libreria in applicazioni e strumenti futuri. La GUI offre un
+pannello «Modello AI» con una scheda per provider (LM Studio, Ollama, OpenAI),
+con campi preimpostati ai valori tipici, verifica della connessione ed elenco
+dei modelli disponibili direttamente dal server; la CLI resta configurata nel
+codice con LM Studio e il modello "qwen3-4b-2507".
 
 Il progetto è distribuito con licenza [MIT](./LICENSE).
 
@@ -117,7 +121,31 @@ robusto e interessante per uso di laboratorio e per prototipi funzionali.
     (`_spazi_markdown`, testato unitariamente) che produce intervalli per i tag
     `md_*` del widget log; gli stili di blocco (risposta finale, errori) hanno
     priorità più alta dei tag markdown, così lo sfondo evidenziato non si
-    interrompe nemmeno su codice o testo formattato.
+    interrompe nemmeno su codice o testo formattato. Gli intervalli calcolati
+    sulla stringa Python vengono convertiti nelle colonne del widget con
+    `_colonna_tk`: Tk 8.x conta i caratteri oltre il piano base Unicode (emoji)
+    come due unità UTF-16 e Tcl 9 come una, e senza la correzione i delimitatori
+    dopo un'emoji si disallineavano (per esempio «**Ricerca web**» appariva
+    troncato a «Ricerca we»). Il fattore è rilevato a runtime con
+    `string length` su un'emoji.
+  - Quando una fase strutturale fallisce nella GUI, il blocco finale usa la
+    variante d'errore (⚠️, sfondo rosato) con un messaggio che rimanda alle
+    fasi in errore invece di un generico «(nessuna sintesi disponibile)» verde,
+    e i ruoli interni (planner, direct, …) sono mostrati con nomi leggibili
+    (`_NOMI_RUOLI_FASE`) così icone e colori dei blocchi restano coerenti.
+
+- Pannello «Modello AI» nella GUI con una scheda per provider (LM Studio,
+  Ollama, OpenAI): il provider viene creato a ogni invio dalla scheda attiva,
+  così il cambio vale dalla richiesta successiva; ogni scheda ha «Verifica
+  connessione», che in un thread separato interroga l'elenco dei modelli,
+  popola la combobox e segnala se il modello scelto non risulta sul server.
+  Per LM Studio/OpenAI si usa `client.models.list()`; per Ollama si usa la API
+  HTTP del demone (`/api/tags` per l'elenco, `/api/chat` per l'invio), così
+  l'SDK Python resta soltanto facoltativo. La scheda Ollama ha anche il campo
+  indirizzo server, passato a `OllamaProvider(host=...)`. La configurazione
+  vale solo per la sessione: nulla viene scritto su disco e la chiave API resta
+  in memoria (in sua assenza si usa `OPENAI_API_KEY` dall'ambiente). La factory
+  `_crea_provider_da_config` è separata dai widget e testata senza GUI.
 
 ### Cose da fare
 
@@ -405,6 +433,10 @@ interprete. Per esempio, su macOS/Linux:
 
 ## Configurazione del modello
 
+Dalla GUI il provider si sceglie dal pannello **Modello AI** senza modificare il
+codice. Le indicazioni qui sotto riguardano la CLI (`agente.py`) e l'uso della
+libreria come package.
+
 ### LM Studio (predefinito)
 
 1. Installare LM Studio e scaricare un modello compatibile con le tool call.
@@ -427,22 +459,40 @@ interprete. Per esempio, su macOS/Linux:
 
 ### Ollama (alternativa locale)
 
-Installare e avviare Ollama, scaricare un modello, ad esempio con
-`ollama pull qwen3:4b`, quindi installare il client opzionale:
+Installare e avviare Ollama e scaricare un modello, ad esempio con
+`ollama pull qwen3:4b`. Il provider funziona senza dipendenze extra: se il
+pacchetto Python `ollama` è presente si usa l'SDK (che segue anche
+`OLLAMA_HOST`), altrimenti `OllamaProvider` ripiega sulla API HTTP del demone
+(`POST <host>/api/chat`) con la sola libreria standard. La scheda Ollama della
+GUI permette di cambiare l'indirizzo del server (predefinito
+`http://localhost:11434`) e l'elenco della combobox arriva da
+`GET <host>/api/tags` (equivalente di `ollama list`), quindi la verifica non
+richiede l'SDK. I modelli "thinking" (per esempio diversi cloud) possono
+scrivere la risposta nel campo `thinking` lasciando `content` vuoto: il
+provider rileva il caso e riprova una sola volta con `think: false`, e una
+risposta davvero vuota viene registrata nel log come «(il modello non ha
+restituito contenuto)» invece di sparire. I residui dei template chat
+(token come `<|close|> response <|sep|>`, osservati con i modelli cloud)
+vengono rimossi dal contenuto dai provider (`_ripulisci_testo_template`
+in `providers.py`) solo quando iniziano con un token di controllo, così il
+testo legittimo non viene toccato. Attenzione ai modelli con suffisso
+`:cloud`: sono eseguiti da Ollama Cloud, quindi prompt e risultati degli
+strumenti escono dalla macchina; inoltre la libreria richiede modelli che
+supportino le tool call, verificando la compatibilità del modello scelto.
 
-```bash
-python -m pip install ollama
-```
+Il pacchetto Python `ollama` è facoltativo: installandolo
+(`python -m pip install ollama`) il provider usa l'SDK, con le sue opzioni
+aggiuntive; senza pacchetto le chiamate passano comunque per la API HTTP del
+demone. Non è elencato in `requirements.txt` proprio perché non è necessario.
 
 In `agente.py`, importare `OllamaProvider` da `AI` e sostituire la riga che crea
 `LMStudioProvider` con:
 
 ```python
 provider = OllamaProvider(model="qwen3:4b")
+# oppure, per un demone non locale:
+# provider = OllamaProvider(model="qwen3:4b", host="http://192.168.1.4:11434")
 ```
-
-`ollama` non è elencato in `requirements.txt` perché serve solo scegliendo
-questo provider.
 
 ### API OpenAI (alternativa remota)
 
@@ -466,7 +516,13 @@ python agente_gui.py
 ```
 
 La finestra permette di scegliere la cartella sandbox, scrivere una richiesta
-e inviarla con il pulsante o con **Ctrl+Invio**. La sandbox predefinita è
+e inviarla con il pulsante o con **Ctrl+Invio**. Il pannello **Modello AI**
+propone una scheda per provider (LM Studio, Ollama, OpenAI) con campi
+preimpostati; il pulsante **Verifica connessione** di ogni scheda controlla
+l'endpoint e carica nella combobox i modelli realmente disponibili sul server.
+Il provider selezionato vale dal prossimo invio e non viene salvato su disco
+(la chiave API OpenAI resta in memoria o viene letta da `OPENAI_API_KEY`).
+La sandbox predefinita è
 `sandbox/` nella cartella del progetto. Il pulsante **Info strumenti** descrive
 le azioni disponibili e le relative cautele; la timeline degli agenti mostra in
 tempo reale pianificatore, worker e sintetizzatore con un indicatore colorato
@@ -588,7 +644,9 @@ risposte di rete e del modello sono simulate nei test.
   verifica la factory applicativa e la creazione di agenti indipendenti con la
   stessa configurazione.
 - [`tests/test_gui_agent_status.py`](./tests/test_gui_agent_status.py): verifica
-  le transizioni di stato e gli indicatori per agenti e task nella GUI.
+  le transizioni di stato e gli indicatori per agenti e task nella GUI, il
+  parser markdown del log, la factory dei provider del pannello «Modello AI»
+  e la robustezza del ramo HTTP di Ollama (verifica, thinking, errori).
 - [`tests/test_web_access.py`](./tests/test_web_access.py): test dei parser
   web, della validazione delle query/URL, dei limiti di rete e
   dell'integrazione con l'agente.
@@ -637,14 +695,20 @@ risposte di rete e del modello sono simulate nei test.
   in un pool limitato e raccoglie i risultati nell'ordine originale. I worker
   non condividono istanze o cronologie e sono limitati a strumenti in sola
   lettura. La risposta grezza del planner viene registrata nella timeline anche
-  se il JSON è invalido; in quel caso l'esecuzione si ferma esplicitamente,
-  senza avviare implicitamente la richiesta in modalità diretta.
+  se il JSON è invalido: in quel caso si concede **un solo** tentativo extra
+  riusando la cronologia del planner con istruzioni di formato esplicite
+  (i modelli piccoli spesso ignorano il formato alla prima richiesta); se
+  anche il secondo tentativo fallisce, l'esecuzione si ferma esplicitamente,
+  senza avviare implicitamente la richiesta in modalità diretta. Gli errori
+  non legati al formato (per esempio di connessione) non vengono ritentati.
 - `OrchestrationError`: errore esplicito per piani invalidi e sintesi assente.
 
 #### `AI/providers.py`
 
 - `OllamaProvider`: comunica con Ollama tramite il suo client Python e
-  converte gli strumenti negli schemi attesi dal servizio.
+  converte gli strumenti negli schemi attesi dal servizio. Accetta un
+  parametro opzionale `host` per puntare a un demone Ollama non locale
+  (senza `host` si usa il default dell'SDK).
 - `OpenAIProvider`: usa l'API Chat Completions compatibile con OpenAI;
   permette di fornire un client oppure `base_url` e `api_key`.
 - `LMStudioProvider`: specializzazione di `OpenAIProvider` preconfigurata

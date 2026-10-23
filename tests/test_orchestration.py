@@ -30,7 +30,10 @@ class FakeAgent:
 
     def run(self, on_response=None, on_tool_result=None, on_status=None):
         if "pianificatore" in self.system_prompt:
-            answer = self.state["plan"]
+            plan = self.state["plan"]
+            # Una lista di piani simula risposte diverse a ogni tentativo,
+            # utile per il retry del pianificatore dopo JSON non valido.
+            answer = plan.pop(0) if isinstance(plan, list) else plan
         elif "sintesi" in self.system_prompt:
             self.state["syntheses"] += 1
             self.state["phase_order"].append("synthesis")
@@ -410,6 +413,56 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIsNone(result.answer)
         self.assertEqual([item.status for item in result.tasks], ["failed", "failed"])
         self.assertEqual(state["syntheses"], 0)
+
+    def test_planner_retries_once_and_recovers_with_valid_json(self):
+        orchestrator, state = self.make_orchestrator(
+            ["Rispondo in linguaggio naturale, non in JSON.",
+             '{"mode":"direct","tasks":[]}']
+        )
+        events = []
+
+        result = orchestrator.run("Rispondi direttamente", on_event=events.append)
+
+        self.assertEqual(result.mode, "direct")
+        self.assertEqual(result.answer, "Risposta diretta")
+        self.assertEqual(result.failures, [])
+        retry_events = [event for event in events if event["type"] == "agent_retry"]
+        self.assertEqual(len(retry_events), 1)
+        self.assertEqual(retry_events[0]["agent_id"], "planner")
+        # Il nuovo tentativo riusa la stessa istanza del planner, quindi vede
+        # nella cronologia la propria risposta sbagliata e il messaggio correttivo.
+        messaggi_utente = [
+            m["content"]
+            for m in state["agents"][0].messages
+            if m["role"] == "user"
+        ]
+        self.assertEqual(len(messaggi_utente), 2)
+        self.assertIn("ESCLUSIVAMENTE", messaggi_utente[1])
+
+    def test_planner_stops_after_one_retry_with_persistent_invalid_plan(self):
+        orchestrator, state = self.make_orchestrator(
+            ["Non è JSON.", "Non è JSON neanche adesso."]
+        )
+        events = []
+
+        result = orchestrator.run("Analizza", on_event=events.append)
+
+        self.assertIsNone(result.answer)
+        self.assertEqual([failure.role for failure in result.failures], ["planner"])
+        retry_events = [event for event in events if event["type"] == "agent_retry"]
+        self.assertEqual(len(retry_events), 1)
+        self.assertEqual(events[-1]["type"], "agent_failed")
+        self.assertEqual(len(state["agents"]), 1)
+
+    def test_empty_model_response_is_emitted_instead_of_disappearing(self):
+        events = []
+        AgentOrchestrator._emit_response(
+            events.append, LLMResponse(content=None), agent_id="x", title="T"
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "model_response")
+        self.assertIn("non ha restituito contenuto", events[0]["message"])
 
     def test_invalid_plan_is_reported_as_failure_result(self):
         orchestrator, state = self.make_orchestrator(

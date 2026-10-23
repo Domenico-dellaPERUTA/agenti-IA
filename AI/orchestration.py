@@ -722,7 +722,15 @@ class AgentOrchestrator:
         request: str,
         on_event: Callable[[dict[str, str]], None] | None,
     ) -> _Plan:
-        """Richiede JSON al planner e applica una validazione rigorosa."""
+        """Richiede JSON al planner e applica una validazione rigorosa.
+
+        I modelli piccoli a volte ignorano il vincolo di formato e rispondono
+        in linguaggio naturale: in quel caso si concede **un solo** tentativo
+        aggiuntivo riusando la cronologia del planner con istruzioni esplicite,
+        così il modello vede il proprio errore. Gli errori non legati al
+        formato (per esempio di connessione) vengono propagati subito, senza
+        retry inutile.
+        """
         try:
             self._emit(
                 on_event,
@@ -734,38 +742,67 @@ class AgentOrchestrator:
             planner = self.agent_factory(_PLAN_PROMPT)
             planner.restrict_tools(frozenset())
             planner.send(request)
-            content = planner.run(
-                on_response=lambda response: self._emit_response(
-                    on_event,
-                    response,
-                    title="Pianificatore",
-                    agent_id="planner",
-                )
-            )
-            if not isinstance(content, str) or not content.strip():
-                raise OrchestrationError("Il pianificatore non ha restituito un piano.")
-            candidate = self._extract_json_object(content)
-            try:
-                raw_plan = json.loads(candidate)
-            except json.JSONDecodeError as error:
-                raise OrchestrationError(
-                    f"Il pianificatore ha restituito JSON non valido: {error.msg}."
-                ) from error
-            if isinstance(raw_plan, dict) and set(raw_plan) != {"mode", "tasks"}:
-                raise OrchestrationError(
-                    "Il pianificatore ha restituito JSON non valido: payload non conforme al piano."
-                )
-            plan = self._validate_plan(raw_plan)
-            if raw_plan.get("mode") == "direct" and raw_plan["tasks"]:
-                self._emit(
-                    on_event,
-                    "plan_warning",
-                    message=(
-                        "Il pianificatore ha indicato modalità direct ma ha incluso "
-                        f"{len(raw_plan['tasks'])} task; verrà usata la richiesta "
-                        "originale e i task del piano saranno ignorati."
-                    ),
-                )
+            plan = None
+            for tentativo in (1, 2):
+                try:
+                    content = planner.run(
+                        on_response=lambda response: self._emit_response(
+                            on_event,
+                            response,
+                            title="Pianificatore",
+                            agent_id="planner",
+                        )
+                    )
+                    if not isinstance(content, str) or not content.strip():
+                        raise OrchestrationError(
+                            "Il pianificatore non ha restituito un piano."
+                        )
+                    candidate = self._extract_json_object(content)
+                    try:
+                        raw_plan = json.loads(candidate)
+                    except json.JSONDecodeError as error:
+                        raise OrchestrationError(
+                            f"Il pianificatore ha restituito JSON non valido: {error.msg}."
+                        ) from error
+                    if isinstance(raw_plan, dict) and set(raw_plan) != {"mode", "tasks"}:
+                        raise OrchestrationError(
+                            "Il pianificatore ha restituito JSON non valido: payload non conforme al piano."
+                        )
+                    plan = self._validate_plan(raw_plan)
+                    if raw_plan.get("mode") == "direct" and raw_plan["tasks"]:
+                        self._emit(
+                            on_event,
+                            "plan_warning",
+                            message=(
+                                "Il pianificatore ha indicato modalità direct ma ha incluso "
+                                f"{len(raw_plan['tasks'])} task; verrà usata la richiesta "
+                                "originale e i task del piano saranno ignorati."
+                            ),
+                        )
+                    break
+                except OrchestrationError as error:
+                    if tentativo == 2:
+                        raise
+                    self._emit(
+                        on_event,
+                        "agent_retry",
+                        agent_id="planner",
+                        role="planner",
+                        title="Pianificatore",
+                        message=(
+                            f"Piano non valido ({error}). Nuovo tentativo con "
+                            "istruzioni di formato esplicite."
+                        ),
+                    )
+                    planner.send(
+                        "La risposta precedente non era un piano JSON valido. "
+                        "Rispondi ora ESCLUSIVAMENTE con un singolo oggetto JSON "
+                        'conforme allo schema {"mode":"direct"|"parallel","tasks":[...]}, '
+                        "senza testo aggiuntivo, senza blocchi Markdown e senza "
+                        "eseguire strumenti."
+                    )
+            if plan is None:  # entrambi i tentativi falliti
+                raise OrchestrationError("Il pianificatore non ha prodotto un piano valido.")
         except Exception as error:
             self._emit(
                 on_event,
@@ -1027,6 +1064,19 @@ class AgentOrchestrator:
                 task_id=task_id,
                 title=title,
                 message=response.content,
+            )
+        elif not response.tool_calls:
+            # Una risposta vuota (per esempio un modello 'thinking' che ha
+            # scritto solo nel campo reasoning) non deve sparire dal log:
+            # senza questo evento l'utente vedrebbe l'agente fallire senza
+            # alcuna traccia della risposta del modello.
+            AgentOrchestrator._emit(
+                on_event,
+                "model_response",
+                agent_id=agent_id,
+                task_id=task_id,
+                title=title,
+                message="(il modello non ha restituito contenuto)",
             )
         for call in response.tool_calls:
             AgentOrchestrator._emit(

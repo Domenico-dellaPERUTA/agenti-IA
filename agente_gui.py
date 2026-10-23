@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import queue
 import re
@@ -39,7 +40,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from AI import AI, LMStudioProvider, OrchestrationResult
+from AI import (
+    AI,
+    LLMProvider,
+    LMStudioProvider,
+    OllamaProvider,
+    OpenAIProvider,
+    OrchestrationResult,
+)
 
 
 # --- Rendering markdown nel log -------------------------------------------
@@ -116,6 +124,22 @@ def _spazi_markdown(linee: list[str]) -> list[tuple[int, int | str, int | str, s
             )
             spazi.append((indice, fine - larghezza_delim, fine, "md_delim"))
     return spazi
+
+
+def _colonna_tk(linea: str, colonna: int, unita_astrale: int = 2) -> int:
+    """Converte una colonna calcolata da Python in colonna del widget Text.
+
+    Il parser ragiona sulla stringa Python, dove ogni carattere vale 1; Tk 8.x
+    invece conta i caratteri oltre il piano base Unicode (per esempio le emoji)
+    come due unità (coppia di surrogati UTF-16) e Tcl 9 come una. Senza questa
+    correzione ogni intervallo che segue un'emoji risulta spostato a destra e
+    i delimitatori markdown restano parzialmente visibili (errore osservato:
+    «**Ricerca web**» mostrato come «*Ricerca we*»).
+    """
+    extra = unita_astrale - 1
+    if extra <= 0:
+        return colonna
+    return colonna + sum(extra for c in linea[:colonna] if ord(c) > 0xFFFF)
 
 
 @dataclass
@@ -221,6 +245,49 @@ class AgentGUI:
         },
     }
 
+    # Schede del pannello «Modello AI»: chiave stabile, titolo mostrato e
+    # valori predefiniti dei campi. La chiave API non ha mai un predefinito e
+    # non viene mai scritta su disco: vale per la sola sessione.
+    _PREDEFINITI_SCHEDE = {
+        "lmstudio": (
+            "LM Studio",
+            {
+                "base_url": "http://localhost:1234/v1",
+                "modello": "ornith-1.5-9b-uncensored",
+            },
+        ),
+        "ollama": (
+            "Ollama",
+            {"modello": "qwen3:4b", "base_url": "http://localhost:11434"},
+        ),
+        "openai": (
+            "OpenAI API",
+            {"modello": "gpt-4o-mini", "api_key": "", "base_url": ""},
+        ),
+    }
+    # Nome leggibile delle fasi strutturali per il log e la timeline: gli
+    # identificatori interni (planner, direct, ...) non sono comprensibili.
+    _NOMI_RUOLI_FASE = {
+        "planner": "Pianificatore",
+        "direct": "Agente diretto",
+        "researcher": "Agente di ricerca",
+        "file_writer": "Agente creazione file",
+        "synthesizer": "Agente sintetizzatore",
+    }
+
+    _MODELLI_PREDEFINITI_OPENAI = ["gpt-4o-mini", "gpt-4o"]
+    # Suggerimenti iniziali per la combobox Ollama: l'elenco reale arriva da
+    # «Verifica connessione» (come `ollama list`). I suffissi ":cloud" sono
+    # modelli eseguiti da Ollama Cloud, non localmente.
+    _MODELLI_PREDEFINITI_OLLAMA = [
+        "qwen3:4b",
+        "deepseek-v4-pro:cloud",
+        "gemma4:31b-cloud",
+        "glm-5.3-flash:cloud",
+        "glm-5.2:cloud",
+        "kimi-k3:cloud",
+    ]
+
     def _rileva_tema_scuro(self, widget: tk.Widget) -> bool:
         """True se lo sfondo effettivo del widget è scuro (testo chiaro).
 
@@ -240,8 +307,17 @@ class AgentGUI:
         INITIAL_PROMPT = (
             "Elenca i file disponibili nella sandbox e dimmi cosa contiene note.txt."
         )
-        DEFAULT_MODEL = "ornith-1.5-9b-uncensored"
-        self.provider = LMStudioProvider(model=DEFAULT_MODEL)
+        # Il provider effettivo viene creato a ogni invio dalla scheda attiva
+        # del pannello «Modello AI»: il cambio di scheda vale dalla richiesta
+        # successiva e nulla viene salvato su disco.
+        self.provider: LLMProvider | None = None
+        self.config_provider: dict[str, dict[str, tk.StringVar]] = {
+            scheda: {
+                campo: tk.StringVar(master=window, value=predefinito)
+                for campo, predefinito in campi.items()
+            }
+            for scheda, (_titolo, campi) in self._PREDEFINITI_SCHEDE.items()
+        }
         _BASE_SYSTEM_PROMPT = (
             "Sei un assistente utile. Usa gli strumenti disponibili per lavorare "
             "solo sui file della sandbox e per cercare informazioni sul web. "
@@ -297,7 +373,7 @@ class AgentGUI:
         frame = ttk.Frame(self.window, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(7, weight=1)
+        frame.rowconfigure(8, weight=1)
 
         ttk.Label(frame, text="Cartella sandbox").grid(
             row=0, column=0, sticky=tk.W
@@ -309,8 +385,10 @@ class AgentGUI:
             row=1, column=1, padx=(8, 0), pady=(4, 8)
         )
 
+        self._crea_pannello_provider(frame)
+
         info_frame = ttk.Frame(frame)
-        info_frame.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+        info_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
         ttk.Label(
             info_frame,
             text="Azioni disponibili all'agente",
@@ -324,7 +402,7 @@ class AgentGUI:
         riepilogo_frame = ttk.LabelFrame(
             frame, text="Agenti attivi adesso", padding=(8, 6)
         )
-        riepilogo_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+        riepilogo_frame.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
         self.riepilogo_frame = riepilogo_frame
         try:
             self.riepilogo_bg: str = ttk.Style(self.window).lookup(
@@ -346,7 +424,7 @@ class AgentGUI:
         self.riepilogo_placeholder.pack(fill=tk.X)
 
         agent_frame = ttk.LabelFrame(frame, text="Timeline di esecuzione", padding=6)
-        agent_frame.grid(row=4, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
+        agent_frame.grid(row=5, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
         agent_frame.columnconfigure(0, weight=3)
         agent_frame.columnconfigure(1, weight=2)
         agent_frame.rowconfigure(0, weight=1)
@@ -385,15 +463,15 @@ class AgentGUI:
         self.node_details.grid(row=0, column=2, sticky=tk.NSEW)
 
         ttk.Label(frame, text="Richiesta per l'agente").grid(
-            row=5, column=0, columnspan=2, sticky=tk.W
+            row=6, column=0, columnspan=2, sticky=tk.W
         )
         self.prompt = tk.Text(frame, height=8, wrap=tk.WORD)
-        self.prompt.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(4, 8))
+        self.prompt.grid(row=7, column=0, columnspan=2, sticky=tk.EW, pady=(4, 8))
         self.prompt.insert("1.0", self.initial_prompt)
         self.prompt.bind("<Control-Return>", self._avvia_da_tastiera)
 
         controls = ttk.Frame(frame)
-        controls.grid(row=7, column=0, columnspan=2, sticky=tk.NSEW)
+        controls.grid(row=8, column=0, columnspan=2, sticky=tk.NSEW)
         controls.columnconfigure(0, weight=1)
         controls.rowconfigure(1, weight=1)
         self.pulsante_avvia = ttk.Button(
@@ -464,6 +542,13 @@ class AgentGUI:
             "md_hr", foreground=palette_log["md_marker"]
         )
         self.output.tag_configure("md_delim", elide=True)
+        # Quante unità Tk usa per i caratteri oltre il piano base (emoji):
+        # Tcl 8.x risponde 2, Tcl 9 risponde 1. Serve per allineare gli
+        # intervalli del rendering markdown alle colonne reali del widget.
+        try:
+            self._unita_astrale = int(self.window.tk.eval("string length \U0001F512"))
+        except (tk.TclError, ValueError):
+            self._unita_astrale = 2
         # Gli stili di blocco (risposta finale, errori, intestazioni di log)
         # prevalgono su quelli markdown quando gli intervalli si sovrappongono:
         # così dentro il blocco verde finale il codice resta monospace ma lo
@@ -471,7 +556,7 @@ class AgentGUI:
         for tag in ("intestazione_log", "finale", "finale_intestazione", "errore"):
             self.output.tag_raise(tag)
         ttk.Label(frame, textvariable=self.stato).grid(
-            row=8, column=0, columnspan=2, sticky=tk.W, pady=(8, 0)
+            row=9, column=0, columnspan=2, sticky=tk.W, pady=(8, 0)
         )
 
     def _mostra_info_strumenti(self) -> None:
@@ -493,6 +578,275 @@ class AgentGUI:
             "• Alcuni siti possono rifiutare l'accesso (per esempio HTTP 403); "
             "l'agente deve continuare con le altre fonti accessibili e segnalarlo.",
         )
+
+    # --- Pannello «Modello AI» ---------------------------------------------
+
+    def _crea_pannello_provider(self, frame: ttk.Frame) -> None:
+        """Costruisce la sezione «Modello AI» con una scheda per provider.
+
+        La scheda attiva nel notebook decide quale provider viene usato al
+        prossimo invio. Il pulsante «Verifica connessione» interroga l'elenco
+        modelli dell'endpoint e popola la combobox della scheda.
+        """
+        provider_frame = ttk.LabelFrame(frame, text="Modello AI", padding=(8, 6))
+        provider_frame.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+        self.notebook_provider = ttk.Notebook(provider_frame)
+        self.notebook_provider.pack(fill=tk.X)
+        self._schede_provider: list[str] = []
+        self._combo_modelli: dict[str, ttk.Combobox] = {}
+        self._stato_verifica: dict[str, tk.Label] = {}
+        self._verifiche_fatte: set[str] = set()
+        colori = self._PALETTE_TIMELINE[self.tema_scuro]
+        try:
+            sfondo = ttk.Style(self.window).lookup("TLabelframe", "background")
+        except tk.TclError:
+            sfondo = ""
+        sfondo_kw: dict[str, str] = {"background": sfondo} if sfondo else {}
+
+        for scheda, (titolo, campi) in self._PREDEFINITI_SCHEDE.items():
+            tab = ttk.Frame(self.notebook_provider, padding=8)
+            tab.columnconfigure(1, weight=1)
+            self.notebook_provider.add(tab, text=titolo)
+            self._schede_provider.append(scheda)
+            variabili = self.config_provider[scheda]
+            riga = 0
+            if scheda == "openai":
+                ttk.Label(tab, text="Chiave API").grid(row=riga, column=0, sticky=tk.W)
+                ttk.Entry(tab, textvariable=variabili["api_key"], show="•").grid(
+                    row=riga, column=1, sticky=tk.EW, padx=(8, 0)
+                )
+                tk.Label(
+                    tab,
+                    text=(
+                        "Lascia vuoto per usare la variabile d'ambiente "
+                        "OPENAI_API_KEY; la chiave digitata non viene salvata."
+                    ),
+                    anchor=tk.W,
+                    foreground=colori["registered"],
+                    **sfondo_kw,
+                ).grid(row=riga + 1, column=0, columnspan=2, sticky=tk.W, pady=(2, 4))
+                riga += 2
+            if scheda in {"lmstudio", "ollama"}:
+                ttk.Label(tab, text="Indirizzo server").grid(row=riga, column=0, sticky=tk.W)
+                ttk.Entry(tab, textvariable=variabili["base_url"]).grid(
+                    row=riga, column=1, sticky=tk.EW, padx=(8, 0)
+                )
+                riga += 1
+            ttk.Label(tab, text="Modello").grid(row=riga, column=0, sticky=tk.W)
+            combo = ttk.Combobox(
+                tab,
+                textvariable=variabili["modello"],
+                values=(
+                    self._MODELLI_PREDEFINITI_OPENAI
+                    if scheda == "openai"
+                    else self._MODELLI_PREDEFINITI_OLLAMA
+                    if scheda == "ollama"
+                    else []
+                ),
+            )
+            combo.grid(row=riga, column=1, sticky=tk.EW, padx=(8, 0))
+            self._combo_modelli[scheda] = combo
+            riga += 1
+            azioni = ttk.Frame(tab)
+            azioni.grid(row=riga, column=0, columnspan=2, sticky=tk.EW, pady=(6, 0))
+            azioni.columnconfigure(0, weight=1)
+            stato = tk.Label(
+                azioni,
+                text="Connessione non verificata",
+                anchor=tk.W,
+                foreground=colori["registered"],
+                **sfondo_kw,
+            )
+            stato.grid(row=0, column=0, sticky=tk.W)
+            self._stato_verifica[scheda] = stato
+            ttk.Button(
+                azioni,
+                text="Verifica connessione",
+                command=lambda s=scheda: self._avvia_verifica(s),
+            ).grid(row=0, column=1, sticky=tk.E)
+        self.notebook_provider.bind("<<NotebookTabChanged>>", self._scheda_cambiata)
+        self.window.after(300, lambda: self._avvia_verifica(self._scheda_attiva()))
+
+    def _scheda_attiva(self) -> str:
+        """Chiave della scheda provider attiva nel notebook (fallback: la prima)."""
+        try:
+            indice = self.notebook_provider.index(self.notebook_provider.select())
+        except (tk.TclError, AttributeError, IndexError):
+            return self._schede_provider[0] if self._schede_provider else "lmstudio"
+        return self._schede_provider[indice]
+
+    def _scheda_cambiata(self, _event: tk.Event | None = None) -> None:
+        """Verifica automaticamente la scheda appena aperta, una sola volta."""
+        scheda = self._scheda_attiva()
+        if scheda not in getattr(self, "_verifiche_fatte", {scheda}):
+            self._avvia_verifica(scheda)
+
+    def _leggi_config_scheda(self, scheda: str) -> dict[str, str]:
+        """Legge i campi della scheda in un dizionario semplice."""
+        return {
+            nome: variabile.get()
+            for nome, variabile in self.config_provider[scheda].items()
+        }
+
+    def _crea_provider_da_config(
+        self, scheda: str, config: dict[str, str]
+    ) -> LLMProvider:
+        """Crea il provider della scheda richiesta, validando i campi.
+
+        Separato dalla GUI per essere testabile senza widget: solleva
+        ``ValueError`` con messaggio chiaro quando manca il modello, il
+        pacchetto ``ollama`` o la chiave API.
+        """
+        modello = config.get("modello", "").strip()
+        if not modello:
+            raise ValueError("Inserisci il nome del modello nella scheda corrente.")
+        if scheda == "lmstudio":
+            base_url = (
+                config.get("base_url", "").strip() or "http://localhost:1234/v1"
+            )
+            return LMStudioProvider(model=modello, base_url=base_url)
+        if scheda == "ollama":
+            # Senza SDK il provider ripiega sulla API HTTP del demone: la
+            # scheda funziona comunque, senza dipendenze da installare.
+            host = config.get("base_url", "").strip() or None
+            return OllamaProvider(model=modello, host=host)
+        if scheda == "openai":
+            chiave = (
+                config.get("api_key", "").strip()
+                or os.environ.get("OPENAI_API_KEY", "").strip()
+            )
+            if not chiave:
+                raise ValueError(
+                    "Chiave OpenAI mancante: inseriscila nel campo o imposta "
+                    "la variabile d'ambiente OPENAI_API_KEY."
+                )
+            base_url = config.get("base_url", "").strip() or None
+            return OpenAIProvider(model=modello, api_key=chiave, base_url=base_url)
+        raise ValueError(f"Provider sconosciuto: {scheda}")
+
+    def _descrivi_provider(self, scheda: str, config: dict[str, str]) -> str:
+        """Riassunto testuale del provider selezionato, per il log."""
+        titolo = self._PREDEFINITI_SCHEDE[scheda][0]
+        modello = config.get("modello", "").strip()
+        base_url = config.get("base_url", "").strip()
+        if scheda == "lmstudio":
+            return f"{titolo} · modello {modello} @ {base_url or 'http://localhost:1234/v1'}"
+        if scheda == "ollama":
+            return f"{titolo} · modello {modello} @ {base_url or 'http://localhost:11434'}"
+        if scheda == "openai" and base_url:
+            return f"{titolo} · modello {modello} @ {base_url}"
+        return f"{titolo} · modello {modello}"
+
+    @staticmethod
+    def _modelli_ollama(host: str) -> list[str]:
+        """Elenca i modelli del demone Ollama via API HTTP, senza l'SDK.
+
+        ``GET /api/tags`` equivale al comando ``ollama list`` e basta la
+        libreria standard, così la verifica funziona anche quando il pacchetto
+        Python ``ollama`` (necessario solo per l'invio) non è installato.
+        """
+        import urllib.error
+        import urllib.request
+
+        host = (host or "").strip().rstrip("/") or "http://localhost:11434"
+        richiesta = urllib.request.Request(
+            f"{host}/api/tags", headers={"User-Agent": "agenti-IA"}
+        )
+        try:
+            with urllib.request.urlopen(richiesta, timeout=5) as risposta:
+                dati = json.loads(risposta.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            motivo = getattr(error, "reason", error)
+            raise ValueError(
+                f"Server Ollama non raggiungibile su {host} ({motivo}). "
+                "Avvia Ollama o correggi l'indirizzo del server."
+            ) from error
+        return [
+            str(modello["name"])
+            for modello in dati.get("models", [])
+            if isinstance(modello, dict) and modello.get("name")
+        ]
+
+    def _interroga_modelli_provider(
+        self, scheda: str, config: dict[str, str]
+    ) -> list[str]:
+        """Interroga l'elenco modelli del provider (rete: mai nel thread GUI)."""
+        if scheda == "ollama":
+            return self._modelli_ollama(config.get("base_url", ""))
+        provider = self._crea_provider_da_config(scheda, config)
+        elenco = provider.client.models.list()
+        return [
+            str(modello.id)
+            for modello in getattr(elenco, "data", [])
+            if getattr(modello, "id", None)
+        ]
+
+    def _avvia_verifica(self, scheda: str) -> None:
+        """Avvia la verifica in un thread senza bloccare il thread grafico."""
+        if not hasattr(self, "_stato_verifica"):
+            return
+        colori = self._PALETTE_TIMELINE[getattr(self, "tema_scuro", False)]
+        self._verifiche_fatte.add(scheda)
+        self._stato_verifica[scheda].configure(
+            text="Verifica in corso…", foreground=colori["running"]
+        )
+        threading.Thread(
+            target=self._thread_verifica,
+            args=(scheda, self._leggi_config_scheda(scheda)),
+            daemon=True,
+        ).start()
+
+    def _thread_verifica(self, scheda: str, config: dict[str, str]) -> None:
+        """Esegue l'interrogazione e riporta l'esito tramite la coda eventi."""
+        try:
+            modelli = self._interroga_modelli_provider(scheda, config)
+            self.events.put(
+                (
+                    "verifica_provider",
+                    {
+                        "scheda": scheda,
+                        "ok": True,
+                        "modelli": modelli,
+                        "errore": "",
+                    },
+                )
+            )
+        except Exception as error:
+            messaggio = str(error) or type(error).__name__
+            self.events.put(
+                (
+                    "verifica_provider",
+                    {"scheda": scheda, "ok": False, "modelli": [], "errore": messaggio},
+                )
+            )
+
+    def _gestisci_esito_verifica(self, payload: dict) -> None:
+        """Aggiorna etichetta e combobox della scheda con l'esito della verifica."""
+        if not isinstance(payload, dict) or not hasattr(self, "_stato_verifica"):
+            return
+        scheda = payload.get("scheda", "")
+        label = self._stato_verifica.get(scheda)
+        if label is None:
+            return
+        colori = self._PALETTE_TIMELINE[getattr(self, "tema_scuro", False)]
+        if payload.get("ok"):
+            modelli = payload.get("modelli", [])
+            combo = self._combo_modelli.get(scheda)
+            nota = ""
+            if combo is not None and modelli:
+                combo.configure(values=modelli)
+                scelto = self.config_provider[scheda]["modello"].get().strip()
+                if scelto and scelto not in modelli:
+                    nota = f" · «{scelto}» non risulta sul server"
+            label.configure(
+                text=f"✔ Connessione riuscita — {len(modelli)} modelli disponibili{nota}",
+                foreground=colori["completed"],
+            )
+        else:
+            label.configure(
+                text=f"✘ Verifica non riuscita: {payload.get('errore', 'errore')}",
+                foreground=colori["failed"],
+            )
 
     def _ensure_execution_state(self) -> None:
         """Inicializza lo stato della timeline anche in test o wrapper leggeri."""
@@ -1024,7 +1378,19 @@ class AgentGUI:
             messagebox.showerror("Richiesta mancante", "Inserisci una richiesta per l'agente.")
             return
 
+        scheda = self._scheda_attiva()
+        try:
+            config = self._leggi_config_scheda(scheda)
+            self.provider = self._crea_provider_da_config(scheda, config)
+        except (ValueError, ImportError) as error:
+            messagebox.showerror("Modello non configurato", str(error))
+            return
+
         self._pulisci_lista_agenti()
+        self._aggiungi_output_etichettato(
+            "Orchestratore",
+            f"Provider selezionato: {self._descrivi_provider(scheda, config)}",
+        )
         self._aggiungi_output_etichettato("Utente", f"> {prompt}\n\n")
         self.pulsante_avvia.configure(state=tk.DISABLED)
         self.stato.set("Orchestratore in esecuzione...")
@@ -1134,6 +1500,8 @@ class AgentGUI:
                         if not isinstance(contenuto, ScriptApprovalRequest):
                             raise TypeError("Richiesta di approvazione script non valida.")
                         self._mostra_dialog_script(contenuto)
+                    elif tipo == "verifica_provider":
+                        self._gestisci_esito_verifica(contenuto)
                     elif tipo == "risultato":
                         if isinstance(contenuto, OrchestrationResult):
                             answer = contenuto.answer
@@ -1156,16 +1524,19 @@ class AgentGUI:
                         )
                         if isinstance(contenuto, OrchestrationResult) and contenuto.failures:
                             for failure in contenuto.failures:
+                                ruolo = self._NOMI_RUOLI_FASE.get(
+                                    failure.role, failure.role
+                                )
                                 self._registra_evento_timeline(
                                     {
                                         "type": "phase_failed",
                                         "agent_id": failure.role,
-                                        "title": failure.role,
+                                        "title": ruolo,
                                         "error": failure.error,
                                     }
                                 )
                                 self._aggiungi_output_etichettato(
-                                    failure.role,
+                                    ruolo,
                                     f"Fase non riuscita: {failure.error}\n\n",
                                     variante="errore",
                                 )
@@ -1174,10 +1545,22 @@ class AgentGUI:
                             "Richiesta",
                             "completed" if status == "Completato" else "failed",
                         )
+                        if answer:
+                            testo_finale = answer
+                            variante_finale = "finale"
+                        elif status != "Completato":
+                            testo_finale = (
+                                "La richiesta non ha prodotto una risposta "
+                                "utilizzabile: vedi le fasi in errore qui sopra."
+                            )
+                            variante_finale = "errore"
+                        else:
+                            testo_finale = "(nessuna sintesi disponibile)"
+                            variante_finale = "finale"
                         self._aggiungi_output_etichettato(
                             "Risposta finale",
-                            answer if answer else "(nessuna sintesi disponibile)",
-                            variante="finale",
+                            testo_finale,
+                            variante=variante_finale,
                         )
                         self.stato.set(status)
                         self.pulsante_avvia.configure(state=tk.NORMAL)
@@ -1490,13 +1873,22 @@ class AgentGUI:
     def _applica_markdown(self, inizio: str, fine: str) -> None:
         """Applica lo stile markdown al corpo del blocco, sotto l'intestazione."""
         linea_base = int(float(inizio))
+        unita_astrale = getattr(self, "_unita_astrale", 2)
         corpo = self.output.get(f"{linea_base + 1}.0", f"{fine} lineend")
-        for indice, col_inizio, col_fine, tag in _spazi_markdown(corpo.split("\n")):
+        linee = corpo.split("\n")
+        for indice, col_inizio, col_fine, tag in _spazi_markdown(linee):
             riga = linea_base + 1 + indice
+            linea = linee[indice]
+            inizio_tk = _colonna_tk(linea, col_inizio, unita_astrale)
+            fine_tk = (
+                "lineend"
+                if col_fine == "lineend"
+                else _colonna_tk(linea, col_fine, unita_astrale)
+            )
             self.output.tag_add(
                 tag,
-                f"{riga}.{col_inizio}",
-                f"{riga}.0 lineend" if col_fine == "lineend" else f"{riga}.{col_fine}",
+                f"{riga}.{inizio_tk}",
+                f"{riga}.0 lineend" if fine_tk == "lineend" else f"{riga}.{fine_tk}",
             )
 
     def _applica_stili_blocco(
@@ -1545,6 +1937,8 @@ class AgentGUI:
             (symbol for name, symbol in icons if agente.startswith(name)),
             "🔹",
         )
+        if variante == "errore":
+            icon = "⚠️"
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
         lines = testo.strip().splitlines() or [""]
         description = "\n".join(f"   {line}" for line in lines)

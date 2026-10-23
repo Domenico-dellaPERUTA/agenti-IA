@@ -1,9 +1,19 @@
+import importlib.util
 import json
+import os
 import queue
 import re
 import unittest
+from unittest import mock
 
-from agente_gui import AgentGUI
+from agente_gui import (
+    AgentGUI,
+    LLMProvider,
+    LMStudioProvider,
+    OpenAIProvider,
+    _colonna_tk,
+    _spazi_markdown,
+)
 
 
 class FakeTreeview:
@@ -328,6 +338,36 @@ class GuiAgentStatusTests(unittest.TestCase):
         self.assertEqual(self.gui.stato.value, "Completato")
         self.assertEqual(self.gui.pulsante_avvia.state, "normal")
 
+    def test_failed_orchestration_shows_final_error_block_with_role_names(self):
+        from AI import OrchestrationResult
+        from AI.orchestration import OrchestrationFailure
+
+        self.gui.events = queue.Queue()
+        self.gui.window = FakeWindow()
+        self.gui.stato = FakeVariable()
+        self.gui.pulsante_avvia = FakeButton()
+        risultato = OrchestrationResult(
+            answer=None,
+            tasks=[],
+            mode="direct",
+            failures=[OrchestrationFailure(role="planner", error="JSON non valido")],
+        )
+        self.gui.events.put(("risultato", risultato))
+
+        self.gui._leggi_eventi()
+
+        output = "".join(self.gui.output_lines)
+        # Il blocco finale si mostra come errore, non come risposta riuscita.
+        self.assertIn("⚠️", output)
+        self.assertIn("Risposta finale", output)
+        self.assertIn("fasi in errore", output)
+        # Il ruolo interno 'planner' è mappato sul nome leggibile.
+        self.assertIn("Pianificatore", output)
+        self.assertEqual(self.gui.stato.value, "Completato con errori")
+        self.assertEqual(self.gui.agent_list.item(
+            self.gui.agent_rows["execution-root"], "values"
+        )[1], "Errore")
+
     def test_clears_previous_request_rows(self):
         self.gui._imposta_stato_agente("planner", "Pianificatore", "completed")
 
@@ -530,9 +570,6 @@ class GuiAgentStatusTests(unittest.TestCase):
         self.assertEqual(self.gui._strumenti_in_corso, {})
 
 
-from agente_gui import _spazi_markdown
-
-
 class GuiMarkdownTests(unittest.TestCase):
     @staticmethod
     def _tag_per_linea(spazi, indice=0):
@@ -587,6 +624,320 @@ class GuiMarkdownTests(unittest.TestCase):
     def test_corsivo(self):
         spazi = self._tag_per_linea(_spazi_markdown(["un *tocco* di stile"]))
         self.assertIn((4, 9, "md_corsivo"), spazi)
+
+    def test_colonna_tk_conta_le_emoji_astrali_come_due_unita(self):
+        # Tk 8.x vede un'emoji astrale come una coppia di surrogati (2 colonne).
+        self.assertEqual(_colonna_tk("🔍 ok", 0), 0)
+        self.assertEqual(_colonna_tk("🔍 ok", 1), 2)
+        self.assertEqual(_colonna_tk("🔍 ok", 4), 5)
+        # Con Tcl 9 (una unità) non c'è correzione da applicare.
+        self.assertEqual(_colonna_tk("🔍 ok", 4, unita_astrale=1), 4)
+        # I caratteri del piano base non influiscono.
+        self.assertEqual(_colonna_tk("àè ok", 5), 5)
+
+    def test_spazi_rimangono_allineati_anche_dopo_un_emoji(self):
+        # Regressione: «**Ricerca web**» dopo 🔍 veniva mostrato «Ricerca we».
+        linea = "   - 🔍 **Ricerca web**: testo"
+        # Vista come la conta Tk 8.x: ogni emoji astrale vale due colonne.
+        vista_tk = "".join(c if ord(c) <= 0xFFFF else "§§" for c in linea)
+        intervalli = {
+            tag: (c1, c2)
+            for _riga, c1, c2, tag in _spazi_markdown([linea])
+            if tag != "md_delim"
+        }
+        c1, c2 = intervalli["md_grassetto"]
+        testo = vista_tk[_colonna_tk(linea, c1): _colonna_tk(linea, c2)]
+        self.assertEqual(testo, "Ricerca web")
+        # Entrambi i delimitatori ** coprono esattamente gli asterischi.
+        delimitatori = [
+            vista_tk[_colonna_tk(linea, c1): _colonna_tk(linea, c2)]
+            for _riga, c1, c2, tag in _spazi_markdown([linea])
+            if tag == "md_delim"
+        ]
+        self.assertEqual(delimitatori, ["**", "**"])
+
+
+class GuiProviderTests(unittest.TestCase):
+    """La factory dei provider della GUI è testabile senza widget reali."""
+
+    def setUp(self):
+        self.gui = AgentGUI.__new__(AgentGUI)
+
+    def test_lmstudio_crea_provider_con_url_configurato(self):
+        provider = self.gui._crea_provider_da_config(
+            "lmstudio",
+            {"modello": "mia-rete", "base_url": "http://127.0.0.1:9999/v1"},
+        )
+
+        self.assertIsInstance(provider, LMStudioProvider)
+        self.assertEqual(provider.model, "mia-rete")
+        self.assertIn("127.0.0.1:9999", str(provider.client.base_url))
+
+    def test_lmstudio_ricade_sull_url_predefinito(self):
+        provider = self.gui._crea_provider_da_config(
+            "lmstudio", {"modello": "mia-rete", "base_url": " "}
+        )
+
+        self.assertIn("localhost:1234", str(provider.client.base_url))
+
+    def test_modello_vuoto_e_rifiutato_per_ogni_scheda(self):
+        for scheda in ("lmstudio", "ollama", "openai"):
+            with self.assertRaises(ValueError):
+                self.gui._crea_provider_da_config(scheda, {"modello": "  "})
+
+    def test_ollama_crea_provider_anche_senza_sdk(self):
+        # Senza il pacchetto 'ollama' il provider ripiega sulla API HTTP:
+        # la factory non deve più fallire.
+        provider = self.gui._crea_provider_da_config(
+            "ollama", {"modello": "qwen3:4b", "base_url": "http://ollama-lan:11434"}
+        )
+
+        self.assertIsInstance(provider, LLMProvider)
+        self.assertEqual(provider.model, "qwen3:4b")
+        self.assertEqual(provider.host, "http://ollama-lan:11434")
+
+    def test_ollama_senza_host_ricade_sul_default(self):
+        provider = self.gui._crea_provider_da_config(
+            "ollama", {"modello": "qwen3:4b", "base_url": " "}
+        )
+
+        self.assertIsNone(provider.host)
+
+    def test_ollama_complete_via_http_quando_manca_l_sdk(self):
+        from agente_gui import OllamaProvider
+
+        corpo = json.dumps(
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Fatto.",
+                    "tool_calls": [
+                        {"function": {"name": "list_files", "arguments": {"path": "/"}}}
+                    ],
+                }
+            }
+        ).encode()
+        finto = mock.MagicMock()
+        finto.read.return_value = corpo
+        finto.__enter__.return_value = finto
+        provider = OllamaProvider(model="qwen3:4b", host="http://ollama-lan:11434")
+        with mock.patch("urllib.request.urlopen", return_value=finto) as aperta, \
+                mock.patch("importlib.util.find_spec", return_value=None):
+            esito = provider.complete([{"role": "user", "content": "ciao"}])
+
+        self.assertEqual(esito.content, "Fatto.")
+        self.assertEqual(esito.tool_calls[0].name, "list_files")
+        self.assertEqual(esito.tool_calls[0].arguments, {"path": "/"})
+        richiesta = aperta.call_args.args[0]
+        self.assertEqual(richiesta.full_url, "http://ollama-lan:11434/api/chat")
+        inviato = json.loads(richiesta.data.decode("utf-8"))
+        self.assertEqual(inviato["model"], "qwen3:4b")
+        self.assertFalse(inviato["stream"])
+        self.assertNotIn("options", inviato)
+
+    def test_ollama_http_inoltra_le_opzioni_extra(self):
+        from agente_gui import OllamaProvider
+
+        finto = mock.MagicMock()
+        finto.read.return_value = json.dumps({"message": {"content": "ok"}}).encode()
+        finto.__enter__.return_value = finto
+        provider = OllamaProvider(model="qwen3:4b", temperature=0.2)
+        with mock.patch("urllib.request.urlopen", return_value=finto) as aperta, \
+                mock.patch("importlib.util.find_spec", return_value=None):
+            provider.complete([{"role": "user", "content": "ciao"}])
+
+        inviato = json.loads(aperta.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(inviato["options"], {"temperature": 0.2})
+
+    def test_ollama_http_errore_di_connessione_leggibile(self):
+        import urllib.error
+
+        from agente_gui import OllamaProvider
+
+        provider = OllamaProvider(model="qwen3:4b")
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("Connection refused"),
+        ), mock.patch("importlib.util.find_spec", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "localhost:11434"):
+                provider.complete([{"role": "user", "content": "ciao"}])
+
+    def test_ollama_http_riprova_con_think_false_se_solo_thinking(self):
+        from agente_gui import OllamaProvider
+
+        pensiero = json.dumps(
+            {"message": {"content": "", "thinking": "sto ragionando…"}}
+        ).encode()
+        risposta = json.dumps({"message": {"content": "Risposta vera."}}).encode()
+        richieste = []
+
+        def finta_urlopen(richiesta, timeout):
+            finto = mock.MagicMock()
+            payload = json.loads(richiesta.data.decode("utf-8"))
+            richieste.append(payload)
+            finto.read.return_value = (
+                risposta if payload.get("think") is False else pensiero
+            )
+            finto.__enter__.return_value = finto
+            return finto
+
+        provider = OllamaProvider(model="kimi-k3:cloud")
+        with mock.patch("urllib.request.urlopen", side_effect=finta_urlopen), \
+                mock.patch("importlib.util.find_spec", return_value=None):
+            esito = provider.complete([{"role": "user", "content": "chi sei?"}])
+
+        self.assertEqual(esito.content, "Risposta vera.")
+        self.assertEqual(len(richieste), 2)
+        self.assertIs(richieste[1].get("think"), False)
+
+    def test_ollama_http_non_ritenta_se_think_gia_impostato(self):
+        from agente_gui import OllamaProvider
+
+        pensiero = json.dumps(
+            {"message": {"content": "", "thinking": "solo ragionamento"}}
+        ).encode()
+        richieste = []
+
+        def finta_urlopen(richiesta, timeout):
+            finto = mock.MagicMock()
+            richieste.append(json.loads(richiesta.data.decode("utf-8")))
+            finto.read.return_value = pensiero
+            finto.__enter__.return_value = finto
+            return finto
+
+        provider = OllamaProvider(model="x", think=False)
+        with mock.patch("urllib.request.urlopen", side_effect=finta_urlopen), \
+                mock.patch("importlib.util.find_spec", return_value=None):
+            esito = provider.complete([{"role": "user", "content": "ciao"}])
+
+        self.assertEqual(len(richieste), 1)
+        self.assertEqual(richieste[0]["options"], {"think": False})
+        self.assertEqual(esito.content, "")
+
+    def test_ollama_http_solleva_l_errore_dichiarato_dal_demone(self):
+        from agente_gui import OllamaProvider
+
+        corpo = json.dumps({"error": "model 'kimi-k3:cloud' not found"}).encode()
+        finto = mock.MagicMock()
+        finto.read.return_value = corpo
+        finto.__enter__.return_value = finto
+        provider = OllamaProvider(model="kimi-k3:cloud")
+        with mock.patch("urllib.request.urlopen", return_value=finto), \
+                mock.patch("importlib.util.find_spec", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "not found"):
+                provider.complete([{"role": "user", "content": "ciao"}])
+
+    def test_ollama_http_mostra_codice_e_dettaglio_http(self):
+        import io
+        import urllib.error
+
+        from agente_gui import OllamaProvider
+
+        provider = OllamaProvider(model="assente:cloud")
+        errore = urllib.error.HTTPError(
+            "http://localhost:11434/api/chat",
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(b'{"error":"model not found"}'),
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=errore), \
+                mock.patch("importlib.util.find_spec", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
+                provider.complete([{"role": "user", "content": "ciao"}])
+
+    def test_openai_senza_chiave_e_rifiutato(self):
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            with self.assertRaisesRegex(ValueError, "OPENAI_API_KEY"):
+                self.gui._crea_provider_da_config(
+                    "openai", {"modello": "gpt-4o-mini", "api_key": "", "base_url": ""}
+                )
+
+    def test_openai_con_chiave_crea_provider(self):
+        provider = self.gui._crea_provider_da_config(
+            "openai",
+            {"modello": "gpt-4o-mini", "api_key": "sk-test", "base_url": ""},
+        )
+
+        self.assertIsInstance(provider, OpenAIProvider)
+        self.assertEqual(provider.model, "gpt-4o-mini")
+
+    def test_scheda_sconosciuta_e_rifiutata(self):
+        with self.assertRaisesRegex(ValueError, "sconosciuto"):
+            self.gui._crea_provider_da_config("huggingface", {"modello": "x"})
+
+    def test_descrizione_provider_cita_modello_e_url(self):
+        testo = self.gui._descrivi_provider(
+            "lmstudio", {"modello": "mia-rete", "base_url": "http://h:1234/v1"}
+        )
+        self.assertIn("LM Studio", testo)
+        self.assertIn("mia-rete", testo)
+        self.assertIn("http://h:1234/v1", testo)
+
+    def test_pulizia_rimuove_cluster_finale_con_e_senza_zwsp(self):
+        from AI.providers import _ripulisci_testo_template as pulisci
+
+        ZW = "​"
+        sporco = (
+            f" Sono Kimi, un modello di Moonshot AI. <{ZW}|close|> response "
+            f"<{ZW}|sep|> <|close|> message <|sep|>"
+        )
+        pulito = pulisci(sporco)
+        self.assertEqual(pulito, "Sono Kimi, un modello di Moonshot AI.")
+
+    def test_pulizia_non_tocca_parole_legittime(self):
+        from AI.providers import _ripulisci_testo_template as pulisci
+
+        testo = "La response corretta arriva al message finale"
+        self.assertEqual(pulisci(testo), testo)
+        self.assertIsNone(pulisci(None))
+        self.assertEqual(pulisci(""), "")
+
+    def test_pulizia_conserva_uno_spazio_tra_parole(self):
+        from AI.providers import _ripulisci_testo_template as pulisci
+
+        self.assertEqual(pulisci("bla<|close|>fine"), "bla fine")
+        self.assertEqual(pulisci("```py\nx = 1\n```\n<|close|>"), "```py\nx = 1\n```")
+
+    def test_modelli_ollama_legge_la_risposta_api_tags(self):
+        corpo = json.dumps(
+            {"models": [{"name": "qwen3:4b"}, {"name": "glm-5.3-flash:cloud"}]}
+        ).encode()
+        finto = mock.MagicMock()
+        finto.read.return_value = corpo
+        finto.__enter__.return_value = finto
+        with mock.patch("urllib.request.urlopen", return_value=finto):
+            nomi = AgentGUI._modelli_ollama("http://localhost:11434")
+
+        self.assertEqual(nomi, ["qwen3:4b", "glm-5.3-flash:cloud"])
+
+    def test_modelli_ollama_ricade_sul_localhost_se_host_vuoto(self):
+        finto = mock.MagicMock()
+        finto.read.return_value = json.dumps({"models": []}).encode()
+        finto.__enter__.return_value = finto
+        with mock.patch("urllib.request.urlopen", return_value=finto) as aperta:
+            AgentGUI._modelli_ollama("")
+
+        richiesta = aperta.call_args.args[0]
+        self.assertEqual(richiesta.full_url, "http://localhost:11434/api/tags")
+
+    def test_modelli_ollama_errore_di_connessione_leggibile(self):
+        import urllib.error
+
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("Connection refused"),
+        ):
+            with self.assertRaisesRegex(ValueError, "non raggiungibile"):
+                AgentGUI._modelli_ollama("http://127.0.0.1:11434")
+
+    def test_ollama_provider_ricorda_l_host_senza_importare_l_sdk(self):
+        from agente_gui import OllamaProvider
+
+        provider = OllamaProvider(model="qwen3:4b", host="http://192.168.1.4:11434")
+
+        self.assertEqual(provider.model, "qwen3:4b")
+        self.assertEqual(provider.host, "http://192.168.1.4:11434")
 
 
 if __name__ == "__main__":

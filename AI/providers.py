@@ -8,12 +8,49 @@ provider viene effettivamente usato.
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import json
+import re
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from typing import Any
 
 from .core import LLMProvider, LLMResponse, ToolCall
+
+# Un "cluster" di impalcatura del template chat inizia sempre con un token di
+# controllo ``<|...|>`` e può proseguire con altri token o con le
+# parole-ponte che i modelli lasciano accanto (response/message/sep).
+_CLUSTER_TEMPLATE_CHAT = re.compile(
+    r"[ \t]*<(?:​)?\|[^|]*(?:​)?\|>"
+    r"(?:\s+(?:<(?:​)?\|[^|]*(?:​)?\|>|(?:response|message|sep)\b))*"
+)
+
+
+def _ripulisci_testo_template(testo: str | None) -> str | None:
+    """Rimuove i residui dei template chat che alcuni modelli lasciano nel testo.
+
+    Alcuni modelli (per esempio i cloud Ollama con template dedicati) lasciano
+    nel contenuto sequenze come ``<|close|> response <|sep|> <|close|>
+    message <|sep|>``: sono impalcatura del formato conversazionale, non testo
+    destinato all'utente. Un cluster viene rimosso solo se inizia con un
+    token di controllo, così un testo legittimo che contiene le parole
+    "response"/"message"/"sep" non viene toccato; quando il cluster separa due
+    parole viene sostituito da un singolo spazio.
+    """
+    if not isinstance(testo, str) or ("<|" not in testo and "<​|" not in testo):
+        return testo
+
+    def _togli_cluster(match: re.Match) -> str:
+        inizio, fine = match.span()
+        prima = testo[inizio - 1] if inizio > 0 else ""
+        dopo = testo[fine] if fine < len(testo) else ""
+        if prima and dopo and not prima.isspace() and not dopo.isspace():
+            return " "
+        return ""
+
+    return _CLUSTER_TEMPLATE_CHAT.sub(_togli_cluster, testo).strip()
 
 # -------------------------------------------------------------------#
 #                           OllamaProvider                           #  
@@ -33,24 +70,73 @@ class OllamaProvider(LLMProvider):
         >>> risposta = agent.run()
     """
 
-    def __init__(self, model: str, **kwargs):
-        """Memorizza il modello Ollama e le opzioni da inoltrare all'SDK."""
+    def __init__(self, model: str, host: str | None = None, **kwargs):
+        """Memorizza il modello Ollama e le opzioni da inoltrare all'SDK.
+
+        Args:
+            model: Nome del modello Ollama (per esempio ``qwen3:4b``).
+            host: Indirizzo del demone Ollama; con ``None`` si usa il default
+                dell'SDK (il demone locale, tipicamente http://localhost:11434).
+            kwargs: Opzioni aggiuntive passate a ``chat()``.
+        """
         self.model = model
+        self.host = host
         self.kwargs = kwargs
 
     def complete(self, messages: list[dict], tools: list[Callable] | None = None) -> LLMResponse:
-        """Invia messaggi e strumenti all'istanza Ollama locale selezionata.
+        """Invia messaggi e strumenti all'istanza Ollama selezionata.
 
-        L'importazione differita mantiene Ollama una dipendenza opzionale.
-        La risposta SDK viene normalizzata nell'oggetto comune del progetto.
+        Se il pacchetto ``ollama`` è installato si usa l'SDK Python, che
+        quando ``host`` è ``None`` segue anche la variabile d'ambiente
+        OLLAMA_HOST; in caso contrario si ripiega sulla API HTTP del demone
+        con la sola libreria standard, così il provider funziona comunque
+        anche senza dipendenze facoltative.
+
+        La risposta viene sempre normalizzata nell'oggetto comune del progetto.
         """
-        from ollama import chat
-
         tool_specs = None
         if tools:
             tool_specs = [self._tool_to_schema(tool) for tool in tools]
 
-        response = chat(model=self.model, messages=messages, tools=tool_specs, **self.kwargs)
+        if importlib.util.find_spec("ollama") is not None:
+            return self._complete_via_sdk(messages, tool_specs)
+        return self._complete_via_http(messages, tool_specs)
+
+    def _complete_via_sdk(self, messages: list[dict], tool_specs: list[dict] | None) -> LLMResponse:
+        """Invoca l'SDK Python ollama e normalizza la risposta.
+
+        Come nel ramo HTTP, una risposta che riempie solo ``thinking`` viene
+        ritentata una volta con ``think=False``; se l'SDK installato non
+        supporta il parametro si rinuncia senza fallire.
+        """
+
+        def chiama(**extra: Any):
+            argomenti = {
+                "model": self.model,
+                "messages": messages,
+                "tools": tool_specs,
+            }
+            argomenti.update(self.kwargs)
+            argomenti.update(extra)
+            if self.host:
+                from ollama import Client
+
+                return Client(host=self.host).chat(**argomenti)
+            from ollama import chat
+
+            return chat(**argomenti)
+
+        response = chiama()
+        contenuto = getattr(response.message, "content", None)
+        if (
+            not (isinstance(contenuto, str) and contenuto.strip())
+            and getattr(response.message, "thinking", None)
+            and "think" not in self.kwargs
+        ):
+            try:
+                response = chiama(think=False)
+            except TypeError:
+                pass  # SDK troppo vecchio per il parametro think
         tool_calls = []
 
         for call in getattr(response.message, "tool_calls", []) or []:
@@ -62,7 +148,86 @@ class OllamaProvider(LLMProvider):
             )
 
         return LLMResponse(
-            content=getattr(response.message, "content", None),
+            content=_ripulisci_testo_template(getattr(response.message, "content", None)),
+            tool_calls=tool_calls,
+        )
+
+    def _complete_via_http(self, messages: list[dict], tool_specs: list[dict] | None) -> LLMResponse:
+        """Invoca ``POST /api/chat`` del demone Ollama con la libreria standard.
+
+        Usata quando l'SDK non è installato: le opzioni extra di ``complete``
+        (``kwargs``) vengono inoltrate come campo ``options`` della richiesta.
+        I modelli "thinking" (per esempio i cloud kimi/deepseek) possono
+        riempire il campo ``thinking`` lasciando ``content`` vuoto: in quel
+        caso si riprova una sola volta con ``think: false``, che chiede al
+        demone di produrre direttamente la risposta.
+        """
+        host = (self.host or "http://localhost:11434").rstrip("/")
+        corpo: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+        }
+        if tool_specs:
+            corpo["tools"] = tool_specs
+        if self.kwargs:
+            corpo["options"] = dict(self.kwargs)
+
+        def invia(payload: dict[str, Any]) -> dict[str, Any]:
+            richiesta = urllib.request.Request(
+                f"{host}/api/chat",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(richiesta, timeout=120) as risposta:
+                    dati = json.loads(risposta.read().decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                dettaglio = error.read().decode("utf-8", "replace")[:300]
+                raise RuntimeError(
+                    f"Il server Ollama all'indirizzo {host} ha risposto "
+                    f"HTTP {error.code}: {dettaglio}"
+                ) from error
+            except (urllib.error.URLError, OSError) as error:
+                motivo = getattr(error, "reason", error)
+                raise RuntimeError(
+                    f"Impossibile raggiungere il provider Ollama all'indirizzo {host} "
+                    f"({motivo}). Verifica l'indirizzo e che il provider sia disponibile."
+                ) from error
+            if dati.get("error"):
+                raise RuntimeError(f"Errore del server Ollama: {dati['error']}")
+            return dati
+
+        dati = invia(corpo)
+        messaggio = dati.get("message") or {}
+        if not isinstance(messaggio, dict):
+            raise RuntimeError("Risposta Ollama non valida: campo 'message' mancante.")
+        contenuto = messaggio.get("content")
+        if (
+            not (isinstance(contenuto, str) and contenuto.strip())
+            and messaggio.get("thinking")
+            and "think" not in self.kwargs
+        ):
+            dati = invia({**corpo, "think": False})
+            messaggio = dati.get("message") or {}
+            if not isinstance(messaggio, dict):
+                raise RuntimeError("Risposta Ollama non valida: campo 'message' mancante.")
+        tool_calls = []
+        for chiamata in messaggio.get("tool_calls") or []:
+            funzione = chiamata.get("function") or {}
+            nome = funzione.get("name")
+            if not nome:
+                continue
+            argomenti = funzione.get("arguments") or {}
+            if isinstance(argomenti, str):
+                try:
+                    argomenti = json.loads(argomenti)
+                except ValueError:
+                    argomenti = {}
+            tool_calls.append(ToolCall(name=str(nome), arguments=dict(argomenti)))
+        return LLMResponse(
+            content=_ripulisci_testo_template(messaggio.get("content")),
             tool_calls=tool_calls,
         )
 
@@ -200,7 +365,7 @@ class OpenAIProvider(LLMProvider):
             )
 
         return LLMResponse(
-            content=getattr(message, "content", None),
+            content=_ripulisci_testo_template(getattr(message, "content", None)),
             tool_calls=tool_calls,
         )
 
