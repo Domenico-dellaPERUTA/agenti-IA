@@ -6,14 +6,8 @@ import re
 import unittest
 from unittest import mock
 
-from agente_gui import (
-    AgentGUI,
-    LLMProvider,
-    LMStudioProvider,
-    OpenAIProvider,
-    _colonna_tk,
-    _spazi_markdown,
-)
+from AI import LLMProvider, LMStudioProvider, OpenAIProvider, OllamaProvider
+from agente_gui import AgentGUI, _colonna_tk, _spazi_markdown
 
 
 class FakeTreeview:
@@ -704,7 +698,6 @@ class GuiProviderTests(unittest.TestCase):
         self.assertIsNone(provider.host)
 
     def test_ollama_complete_via_http_quando_manca_l_sdk(self):
-        from agente_gui import OllamaProvider
 
         corpo = json.dumps(
             {
@@ -736,7 +729,6 @@ class GuiProviderTests(unittest.TestCase):
         self.assertNotIn("options", inviato)
 
     def test_ollama_http_inoltra_le_opzioni_extra(self):
-        from agente_gui import OllamaProvider
 
         finto = mock.MagicMock()
         finto.read.return_value = json.dumps({"message": {"content": "ok"}}).encode()
@@ -752,7 +744,6 @@ class GuiProviderTests(unittest.TestCase):
     def test_ollama_http_errore_di_connessione_leggibile(self):
         import urllib.error
 
-        from agente_gui import OllamaProvider
 
         provider = OllamaProvider(model="qwen3:4b")
         with mock.patch(
@@ -763,7 +754,6 @@ class GuiProviderTests(unittest.TestCase):
                 provider.complete([{"role": "user", "content": "ciao"}])
 
     def test_ollama_http_riprova_con_think_false_se_solo_thinking(self):
-        from agente_gui import OllamaProvider
 
         pensiero = json.dumps(
             {"message": {"content": "", "thinking": "sto ragionando…"}}
@@ -791,7 +781,6 @@ class GuiProviderTests(unittest.TestCase):
         self.assertIs(richieste[1].get("think"), False)
 
     def test_ollama_http_non_ritenta_se_think_gia_impostato(self):
-        from agente_gui import OllamaProvider
 
         pensiero = json.dumps(
             {"message": {"content": "", "thinking": "solo ragionamento"}}
@@ -815,7 +804,6 @@ class GuiProviderTests(unittest.TestCase):
         self.assertEqual(esito.content, "")
 
     def test_ollama_http_solleva_l_errore_dichiarato_dal_demone(self):
-        from agente_gui import OllamaProvider
 
         corpo = json.dumps({"error": "model 'kimi-k3:cloud' not found"}).encode()
         finto = mock.MagicMock()
@@ -831,7 +819,6 @@ class GuiProviderTests(unittest.TestCase):
         import io
         import urllib.error
 
-        from agente_gui import OllamaProvider
 
         provider = OllamaProvider(model="assente:cloud")
         errore = urllib.error.HTTPError(
@@ -932,7 +919,6 @@ class GuiProviderTests(unittest.TestCase):
                 AgentGUI._modelli_ollama("http://127.0.0.1:11434")
 
     def test_ollama_provider_ricorda_l_host_senza_importare_l_sdk(self):
-        from agente_gui import OllamaProvider
 
         provider = OllamaProvider(model="qwen3:4b", host="http://192.168.1.4:11434")
 

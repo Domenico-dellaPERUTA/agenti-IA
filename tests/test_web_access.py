@@ -625,8 +625,15 @@ class WebAccessTests(TestCase):
         )
         displayed = StringIO()
         with (
-            patch.object(application_module, "LMStudioProvider", return_value=provider),
-            patch("builtins.input", side_effect=["Scansiona localhost", "ESEGUI"]),
+            patch.object(
+                application_module,
+                "configura_provider",
+                return_value=("lmstudio", {"modello": "dummy", "base_url": ""}),
+            ),
+            patch.object(
+                application_module, "crea_provider", return_value=provider
+            ),
+            patch("builtins.input", side_effect=["Scansiona localhost", "ESEGUI", "chiudi"]),
             redirect_stdout(displayed),
         ):
             agente_module.main()
@@ -647,8 +654,15 @@ class WebAccessTests(TestCase):
         )
         displayed = StringIO()
         with (
-            patch.object(application_module, "LMStudioProvider", return_value=provider),
-            patch("builtins.input", side_effect=["Richiesta di prova", ""]),
+            patch.object(
+                application_module,
+                "configura_provider",
+                return_value=("lmstudio", {"modello": "dummy", "base_url": ""}),
+            ),
+            patch.object(
+                application_module, "crea_provider", return_value=provider
+            ),
+            patch("builtins.input", side_effect=["Richiesta di prova", "", "esci"]),
             redirect_stdout(displayed),
         ):
             agente_module.main()
@@ -661,7 +675,7 @@ class WebAccessTests(TestCase):
         )
         self.assertRegex(
             output,
-            r"⚙️ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · Risultato finale\n"
+            r"✅ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · Risposta finale\n"
             r"   Risposta di prova\.",
         )
         self.assertIn("Pianificatore", output)

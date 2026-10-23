@@ -13,6 +13,13 @@ from .orchestration import (
     TaskSpec,
 )
 from .providers import LMStudioProvider, OllamaProvider, OpenAIProvider
+from .provider_setup import (
+    SCHEDE_PROVIDER,
+    crea_provider,
+    descrivi_provider,
+    elenca_modelli,
+    modelli_ollama,
+)
 from .web import InternetAccess
 from .application import AI
 
@@ -33,4 +40,9 @@ __all__ = [
     "OllamaProvider",
     "OpenAIProvider",
     "LMStudioProvider",
+    "SCHEDE_PROVIDER",
+    "crea_provider",
+    "descrivi_provider",
+    "elenca_modelli",
+    "modelli_ollama",
 ]

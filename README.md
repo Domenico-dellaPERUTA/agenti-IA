@@ -7,11 +7,12 @@ registrare strumenti utilizzabili dagli agenti e, facoltativamente, lavorare
 con file entro una cartella sandbox o consultare pagine web pubbliche.
 
 Il progetto include anche una GUI e una CLI dimostrative, utili come esempi di
-integrazione della libreria in applicazioni e strumenti futuri. La GUI offre un
-pannello «Modello AI» con una scheda per provider (LM Studio, Ollama, OpenAI),
-con campi preimpostati ai valori tipici, verifica della connessione ed elenco
-dei modelli disponibili direttamente dal server; la CLI resta configurata nel
-codice con LM Studio e il modello "qwen3-4b-2507".
+integrazione della libreria in applicazioni e strumenti futuri. Entrambe offrono
+una configurazione guidata del provider: la GUI con il pannello «Modello AI»
+(scheda per provider, campi preimpostati, verifica connessione ed elenco dei
+modelli del server), la CLI con la fase interattiva `configura_provider`
+all'avvio (stesse regole, condivise in `AI/provider_setup.py`). Quando l'input
+della CLI non è un terminale interattivo vengono usati i predefiniti.
 
 Il progetto è distribuito con licenza [MIT](./LICENSE).
 
@@ -144,8 +145,10 @@ robusto e interessante per uso di laboratorio e per prototipi funzionali.
   l'SDK Python resta soltanto facoltativo. La scheda Ollama ha anche il campo
   indirizzo server, passato a `OllamaProvider(host=...)`. La configurazione
   vale solo per la sessione: nulla viene scritto su disco e la chiave API resta
-  in memoria (in sua assenza si usa `OPENAI_API_KEY` dall'ambiente). La factory
-  `_crea_provider_da_config` è separata dai widget e testata senza GUI.
+  in memoria (in sua assenza si usa `OPENAI_API_KEY` dall'ambiente). La stessa
+  selezione guidata esiste nella CLI (`configura_provider` in `agente.py`) e le
+  regole condivise (predefiniti, factory, validazione, elenco modelli) vivono
+  in `AI/provider_setup.py`, usato da entrambi i frontend e testato unitariamente.
 
 ### Cose da fare
 
@@ -433,9 +436,9 @@ interprete. Per esempio, su macOS/Linux:
 
 ## Configurazione del modello
 
-Dalla GUI il provider si sceglie dal pannello **Modello AI** senza modificare il
-codice. Le indicazioni qui sotto riguardano la CLI (`agente.py`) e l'uso della
-libreria come package.
+Dalla GUI il provider si sceglie dal pannello **Modello AI** e dalla CLI dalla
+fase di configurazione guidata all'avvio, entrambe senza modificare il codice.
+Le indicazioni qui sotto riguardano solo l'uso della libreria come package.
 
 ### LM Studio (predefinito)
 
@@ -541,7 +544,16 @@ Per l'avvio da terminale:
 python agente.py
 ```
 
-La CLI chiede la richiesta nel terminale. Se l'agente vuole eseguire uno
+La CLI parte con una fase di configurazione guidata del modello: sceglie il
+provider (LM Studio, Ollama, OpenAI) con un menu numerato, verifica la
+connessione e mostra i modelli realmente disponibili sul server per la
+selezione; in caso di errore propone di riprovare, continuare comunque o
+cambiare provider. Se l'input non è un terminale interattivo (pipeline,
+redirect) usa i predefiniti senza fare domande. Dopo la configurazione la CLI
+resta attiva come un REPL: l'utente può inviare più richieste di fila e il
+provider scelto resta valido per tutta la sessione; l'applicazione si chiude
+solo scrivendo `chiudi` o `esci` (oppure con EOF o Ctrl+C, gestiti come uscita
+pulita). Se l'agente vuole eseguire uno
 script Bash, mostra il codice completo e attende che l'utente digiti
 `ESEGUI`; qualsiasi altro input o la fine dell'input annulla l'esecuzione.
 L'output dei comandi appare in tempo reale nel terminale. Se Tkinter non è
@@ -597,6 +609,7 @@ risposte di rete e del modello sono simulate nei test.
 │   ├── __init__.py
 │   ├── core.py
 │   ├── orchestration.py
+│   ├── provider_setup.py
 │   ├── providers.py
 │   └── web.py
 ├── sandbox/
@@ -604,6 +617,7 @@ risposte di rete e del modello sono simulate nei test.
 ├── tests/
 │   ├── test_agent_tools.py
 │   ├── test_app_orchestration.py
+│   ├── test_cli_config.py
 │   ├── test_gui_agent_status.py
 │   ├── test_orchestration.py
 │   └── test_web_access.py
@@ -615,7 +629,8 @@ risposte di rete e del modello sono simulate nei test.
 ### File del progetto
 
 - [`agente.py`](./agente.py): punto d'ingresso CLI; contiene
-  `main()`, che configura la factory `AI` con le impostazioni della CLI.
+  `configura_provider(...)`, la fase guidata di scelta del modello, e
+  `main()`, che la usa e configura la factory `AI` con le impostazioni scelte.
 - [`agente_gui.py`](./agente_gui.py): punto d'ingresso GUI Tkinter; contiene la
   classe `AgentGUI`, che costruisce la finestra, avvia l'agente in un thread
   e mostra risposte, azioni ed errori.
@@ -631,6 +646,9 @@ risposte di rete e del modello sono simulate nei test.
   dai chiamanti, per agenti e orchestratore applicativo.
 - [`AI/providers.py`](./AI/providers.py): adattatori per i diversi servizi
   linguistici.
+- [`AI/provider_setup.py`](./AI/provider_setup.py): regole condivise per la
+  selezione del provider da GUI e CLI: predefiniti delle schede, factory con
+  validazione, elenco dei modelli del server e descrizione per il log.
 - [`AI/web.py`](./AI/web.py): ricerca e lettura web in sola lettura.
 - [`sandbox/note.txt`](./sandbox/note.txt): esempio di testo utilizzabile
   dall'agente. Altri file in `sandbox/` sono dati locali e possono variare da
@@ -650,6 +668,9 @@ risposte di rete e del modello sono simulate nei test.
 - [`tests/test_web_access.py`](./tests/test_web_access.py): test dei parser
   web, della validazione delle query/URL, dei limiti di rete e
   dell'integrazione con l'agente.
+- [`tests/test_cli_config.py`](./tests/test_cli_config.py): test della
+  configurazione guidata della CLI (input simulato), del loop REPL con uscita
+  su `chiudi`/`esci`/EOF e del modulo condiviso `AI/provider_setup.py`.
 - [`.gitignore`](./.gitignore): esclude bytecode Python e file della sandbox
   dal versionamento.
 - [`.vscode/launch.json`](./.vscode/launch.json): configurazioni di debug

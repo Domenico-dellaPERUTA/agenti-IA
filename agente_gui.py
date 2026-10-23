@@ -40,13 +40,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from AI import (
-    AI,
-    LLMProvider,
-    LMStudioProvider,
-    OllamaProvider,
-    OpenAIProvider,
-    OrchestrationResult,
+from AI import LLMProvider, OrchestrationResult
+from AI import AI
+from AI.provider_setup import (
+    SCHEDE_PROVIDER,
+    crea_provider,
+    descrivi_provider,
+    elenca_modelli,
+    modelli_ollama,
 )
 
 
@@ -245,26 +246,10 @@ class AgentGUI:
         },
     }
 
-    # Schede del pannello «Modello AI»: chiave stabile, titolo mostrato e
-    # valori predefiniti dei campi. La chiave API non ha mai un predefinito e
-    # non viene mai scritta su disco: vale per la sola sessione.
-    _PREDEFINITI_SCHEDE = {
-        "lmstudio": (
-            "LM Studio",
-            {
-                "base_url": "http://localhost:1234/v1",
-                "modello": "ornith-1.5-9b-uncensored",
-            },
-        ),
-        "ollama": (
-            "Ollama",
-            {"modello": "qwen3:4b", "base_url": "http://localhost:11434"},
-        ),
-        "openai": (
-            "OpenAI API",
-            {"modello": "gpt-4o-mini", "api_key": "", "base_url": ""},
-        ),
-    }
+    # I predefiniti delle schede vivono in AI.provider_setup, condivisi
+    # con la CLI; la chiave API non ha mai un predefinito e non viene
+    # mai scritta su disco: vale per la sola sessione.
+    _PREDEFINITI_SCHEDE = SCHEDE_PROVIDER
     # Nome leggibile delle fasi strutturali per il log e la timeline: gli
     # identificatori interni (planner, direct, ...) non sono comprensibili.
     _NOMI_RUOLI_FASE = {
@@ -691,95 +676,23 @@ class AgentGUI:
     def _crea_provider_da_config(
         self, scheda: str, config: dict[str, str]
     ) -> LLMProvider:
-        """Crea il provider della scheda richiesta, validando i campi.
-
-        Separato dalla GUI per essere testabile senza widget: solleva
-        ``ValueError`` con messaggio chiaro quando manca il modello, il
-        pacchetto ``ollama`` o la chiave API.
-        """
-        modello = config.get("modello", "").strip()
-        if not modello:
-            raise ValueError("Inserisci il nome del modello nella scheda corrente.")
-        if scheda == "lmstudio":
-            base_url = (
-                config.get("base_url", "").strip() or "http://localhost:1234/v1"
-            )
-            return LMStudioProvider(model=modello, base_url=base_url)
-        if scheda == "ollama":
-            # Senza SDK il provider ripiega sulla API HTTP del demone: la
-            # scheda funziona comunque, senza dipendenze da installare.
-            host = config.get("base_url", "").strip() or None
-            return OllamaProvider(model=modello, host=host)
-        if scheda == "openai":
-            chiave = (
-                config.get("api_key", "").strip()
-                or os.environ.get("OPENAI_API_KEY", "").strip()
-            )
-            if not chiave:
-                raise ValueError(
-                    "Chiave OpenAI mancante: inseriscila nel campo o imposta "
-                    "la variabile d'ambiente OPENAI_API_KEY."
-                )
-            base_url = config.get("base_url", "").strip() or None
-            return OpenAIProvider(model=modello, api_key=chiave, base_url=base_url)
-        raise ValueError(f"Provider sconosciuto: {scheda}")
+        """Delega la factory condivisa di ``AI.provider_setup``."""
+        return crea_provider(scheda, config)
 
     def _descrivi_provider(self, scheda: str, config: dict[str, str]) -> str:
         """Riassunto testuale del provider selezionato, per il log."""
-        titolo = self._PREDEFINITI_SCHEDE[scheda][0]
-        modello = config.get("modello", "").strip()
-        base_url = config.get("base_url", "").strip()
-        if scheda == "lmstudio":
-            return f"{titolo} · modello {modello} @ {base_url or 'http://localhost:1234/v1'}"
-        if scheda == "ollama":
-            return f"{titolo} · modello {modello} @ {base_url or 'http://localhost:11434'}"
-        if scheda == "openai" and base_url:
-            return f"{titolo} · modello {modello} @ {base_url}"
-        return f"{titolo} · modello {modello}"
+        return descrivi_provider(scheda, config)
 
     @staticmethod
     def _modelli_ollama(host: str) -> list[str]:
-        """Elenca i modelli del demone Ollama via API HTTP, senza l'SDK.
-
-        ``GET /api/tags`` equivale al comando ``ollama list`` e basta la
-        libreria standard, così la verifica funziona anche quando il pacchetto
-        Python ``ollama`` (necessario solo per l'invio) non è installato.
-        """
-        import urllib.error
-        import urllib.request
-
-        host = (host or "").strip().rstrip("/") or "http://localhost:11434"
-        richiesta = urllib.request.Request(
-            f"{host}/api/tags", headers={"User-Agent": "agenti-IA"}
-        )
-        try:
-            with urllib.request.urlopen(richiesta, timeout=5) as risposta:
-                dati = json.loads(risposta.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError) as error:
-            motivo = getattr(error, "reason", error)
-            raise ValueError(
-                f"Server Ollama non raggiungibile su {host} ({motivo}). "
-                "Avvia Ollama o correggi l'indirizzo del server."
-            ) from error
-        return [
-            str(modello["name"])
-            for modello in dati.get("models", [])
-            if isinstance(modello, dict) and modello.get("name")
-        ]
+        """Delega l'elenco condiviso (``/api/tags``) in ``AI.provider_setup``."""
+        return modelli_ollama(host)
 
     def _interroga_modelli_provider(
         self, scheda: str, config: dict[str, str]
     ) -> list[str]:
         """Interroga l'elenco modelli del provider (rete: mai nel thread GUI)."""
-        if scheda == "ollama":
-            return self._modelli_ollama(config.get("base_url", ""))
-        provider = self._crea_provider_da_config(scheda, config)
-        elenco = provider.client.models.list()
-        return [
-            str(modello.id)
-            for modello in getattr(elenco, "data", [])
-            if getattr(modello, "id", None)
-        ]
+        return elenca_modelli(scheda, config)
 
     def _avvia_verifica(self, scheda: str) -> None:
         """Avvia la verifica in un thread senza bloccare il thread grafico."""
