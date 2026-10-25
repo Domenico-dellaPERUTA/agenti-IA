@@ -355,9 +355,16 @@ aggiungere strumenti, registra funzioni con `Agent.add_tool()`.
   esito di quella singola lettura; l'agente può continuare con le altre fonti
   e indicare quali non erano accessibili.
   Se DuckDuckGo non restituisce risultati leggibili, vengono tentati entrambi
-  i layout supportati; se il motore presenta una verifica anti-automazione o
-  un limite temporaneo, viene segnalato esplicitamente come tale invece di
-  apparire come una ricerca con zero risultati.
+  i layout supportati; se il motore presenta una verifica anti-automazione su
+  un layout, si prova l'altro e l'errore terminale scatta solo se entrambi sono
+  sfidati (segnalato esplicitamente, non come zero risultati). Le richieste si
+  presentano con uno User-Agent da browser desktop e header `Accept-Language`:
+  l'endpoint HTML di DuckDuckGo, nato per i client senza JavaScript, risponde
+  con il challenge HTTP 202 agli UA che si dichiarano bot (verificato in sede
+  di debug). Per ulteriore prudenza verso le protezioni anti-bot durante le
+  ricerche parallele, tutte le richieste HTTP in uscita sono distanziate da un
+  intervallo minimo (`REQUEST_MIN_INTERVAL`, predefinito 1s) condiviso
+  dall'intero processo.
 - Le ricerche web inviano la query a DuckDuckGo. Non inserirvi informazioni
   private, credenziali o contenuti della sandbox. I risultati web sono
   contenuti non attendibili; l'agente li tratta come fonti e aggiunge le
@@ -532,8 +539,10 @@ Il provider selezionato vale dal prossimo invio e non viene salvato su disco
 La sandbox predefinita è
 `sandbox/` nella cartella del progetto. Il pulsante **Info strumenti** descrive
 le azioni disponibili e le relative cautele; il layout è compatto (sandbox,
-selezione e info sulla stessa riga) perché il log eventi, incorniciato nel
-riquadro «Log eventi e risposta», domini la finestra; la timeline degli
+selezione, apertura nel file manager e info sulla stessa riga) perché il log
+eventi, incorniciato nel riquadro «Log eventi e risposta», domini la finestra;
+il campo richiesta ha un bordo visibile, è vuoto di default con un suggerimento
+segnaposto grigio, e il log viene azzerato a ogni nuovo invio; la timeline degli
 agenti — con indicatore colorato per stato e colonna «Attività corrente» — è
 richiudibile e si apre con il pulsante **▶ Timeline di esecuzione**; il
 pannello **Agenti attivi adesso** riepiloga chi sta lavorando e cosa sta

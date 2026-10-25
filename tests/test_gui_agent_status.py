@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from AI import LLMProvider, LMStudioProvider, OpenAIProvider, OllamaProvider
+import agente_gui as agente_gui_module
 from agente_gui import AgentGUI, _colonna_tk, _spazi_markdown
 
 
@@ -958,6 +959,89 @@ class TimelineRichiudibileTests(unittest.TestCase):
         gui._commuta_timeline()
         self.assertFalse(gui.agent_frame.visibile)
         self.assertEqual(gui.pulsante_timeline.testo, "▶ Timeline di esecuzione")
+
+
+class PromptESandboxTests(unittest.TestCase):
+    class FakePromptTesto:
+        """Sostituto minimo di tk.Text per la logica del segnaposto."""
+
+        def __init__(self):
+            self.testo = ""
+            self.tags = []
+
+        def get(self, *_args, **_kw):
+            if not self.testo:
+                return "\n"
+            return self.testo if self.testo.endswith("\n") else self.testo + "\n"
+
+        def delete(self, *_args):
+            self.testo = ""
+
+        def insert(self, _pos, testo, *_args):
+            self.testo += testo
+
+        def tag_add(self, *args):
+            self.tags.append(args)
+
+        def tag_remove(self, *args):
+            self.tags.append(("remove",) + args)
+
+    def _gui_con_prompt(self):
+        gui = AgentGUI.__new__(AgentGUI)
+        gui.prompt = self.FakePromptTesto()
+        gui._prompt_ha_placeholder = False
+        return gui
+
+    def test_segnaposto_mostra_suggerimento_e_toglie_alla_scrittura(self):
+        gui = self._gui_con_prompt()
+
+        gui._mostra_placeholder_prompt()
+        self.assertTrue(gui._prompt_ha_placeholder)
+        self.assertIn("Scrivi qui", gui.prompt.testo)
+        self.assertEqual(gui._testo_prompt(), "")  # non è testo reale
+
+        gui._rimuovi_placeholder_prompt()
+        self.assertFalse(gui._prompt_ha_placeholder)
+        self.assertEqual(gui.prompt.testo, "")
+
+    def test_testo_reale_letto_e_placeholder_ripristinato_se_vuoto(self):
+        gui = self._gui_con_prompt()
+
+        gui.prompt.testo = "  una richiesta vera  "
+        self.assertEqual(gui._testo_prompt(), "una richiesta vera")
+
+        gui.prompt.testo = ""
+        gui._aggiorna_placeholder_prompt()
+        self.assertTrue(gui._prompt_ha_placeholder)
+
+    def test_apri_sandbox_invoca_il_file_manager(self):
+        gui = AgentGUI.__new__(AgentGUI)
+        variabile = mock.MagicMock()
+        variabile.get.return_value = "/tmp"
+        gui.cartella_sandbox = variabile
+        gui.messagebox = None
+        with mock.patch.object(
+            agente_gui_module.messagebox, "showerror", create=True
+        ) as showerror, mock.patch(
+            "subprocess.run", return_value=mock.MagicMock(returncode=0)
+        ) as eseguito:
+            gui._apri_sandbox()
+
+        self.assertEqual(eseguito.call_count, 1)
+        self.assertIn("/tmp", eseguito.call_args.args[0])
+        self.assertFalse(showerror.called)
+
+    def test_apri_sandbox_con_cartella_assente_avvisa(self):
+        gui = AgentGUI.__new__(AgentGUI)
+        variabile = mock.MagicMock()
+        variabile.get.return_value = "/percorso/che/non/esiste/davvero"
+        gui.cartella_sandbox = variabile
+        with mock.patch.object(
+            agente_gui_module.messagebox, "showerror", create=True
+        ) as showerror:
+            gui._apri_sandbox()
+
+        self.assertTrue(showerror.called)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import subprocess
 import sys
 import threading
 
@@ -414,8 +415,11 @@ class AgentGUI:
             riga_sandbox, text="Seleziona cartella", command=self._seleziona_cartella
         ).grid(row=0, column=2)
         ttk.Button(
-            riga_sandbox, text="ⓘ Info strumenti", command=self._mostra_info_strumenti
+            riga_sandbox, text="Apri sandbox", command=self._apri_sandbox
         ).grid(row=0, column=3, padx=(6, 0))
+        ttk.Button(
+            riga_sandbox, text="ⓘ Info strumenti", command=self._mostra_info_strumenti
+        ).grid(row=0, column=4, padx=(6, 0))
 
         self._crea_pannello_provider(frame)
 
@@ -497,10 +501,25 @@ class AgentGUI:
         ttk.Label(frame, text="Richiesta per l'agente").grid(
             row=5, column=0, columnspan=2, sticky=tk.W
         )
-        self.prompt = tk.Text(frame, height=4, wrap=tk.WORD)
+        # Bordo sempre visibile (grigio a riposo, blu a fuoco) e campo vuoto di
+        # default con un testo segnaposto che sparisce alla prima scrittura.
+        self.prompt = tk.Text(
+            frame,
+            height=4,
+            wrap=tk.WORD,
+            highlightthickness=1,
+            highlightbackground=palette_stati["registered"],
+            highlightcolor=palette_log["ruolo_utente"],
+        )
         self.prompt.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(4, 6))
-        self.prompt.insert("1.0", self.initial_prompt)
+        self.prompt.tag_configure(
+            "suggerimento", foreground=self._colori_riepilogo["placeholder"]
+        )
+        self._prompt_ha_placeholder = False
+        self.prompt.bind("<FocusIn>", self._rimuovi_placeholder_prompt)
+        self.prompt.bind("<FocusOut>", self._aggiorna_placeholder_prompt)
         self.prompt.bind("<Control-Return>", self._avvia_da_tastiera)
+        self._mostra_placeholder_prompt()
 
         controls = ttk.Frame(frame)
         controls.grid(row=7, column=0, columnspan=2, sticky=tk.NSEW)
@@ -1345,10 +1364,68 @@ class AgentGUI:
         if cartella:
             self.cartella_sandbox.set(cartella)
 
+    def _apri_sandbox(self) -> None:
+        """Apre la cartella sandbox nel file manager del sistema operativo."""
+        percorso = Path(self.cartella_sandbox.get().strip()).expanduser()
+        if not percorso.is_dir():
+            messagebox.showerror(
+                "Cartella non valida", "La cartella sandbox selezionata non esiste."
+            )
+            return
+        comando = "open" if sys.platform == "darwin" else "xdg-open"
+        try:
+            subprocess.run([comando, str(percorso)], check=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            messagebox.showerror(
+                "Apertura non riuscita",
+                f"Impossibile aprire la cartella sandbox: {error}",
+            )
+
+    _TESTO_SUGGERIMENTO_PROMPT = (
+        "Scrivi qui la tua richiesta… (per esempio: «Elenca i file della "
+        "sandbox e dimmi cosa contiene note.txt» — Ctrl+Invio per inviare)"
+    )
+
+    def _mostra_placeholder_prompt(self) -> None:
+        """Visualizza il testo segnaposto grigio nel campo richiesta."""
+        if self._prompt_ha_placeholder:
+            return
+        self._prompt_ha_placeholder = True
+        self.prompt.delete("1.0", tk.END)
+        self.prompt.insert("1.0", self._TESTO_SUGGERIMENTO_PROMPT)
+        self.prompt.tag_add("suggerimento", "1.0", tk.END)
+
+    def _rimuovi_placeholder_prompt(self, _event: tk.Event | None = None) -> None:
+        """Elimina il segnaposto quando l'utente entra nel campo."""
+        if not self._prompt_ha_placeholder:
+            return
+        self._prompt_ha_placeholder = False
+        self.prompt.delete("1.0", tk.END)
+
+    def _aggiorna_placeholder_prompt(self, _event: tk.Event | None = None) -> None:
+        """Ripristina il segnaposto quando il campo resta vuoto al FocusOut."""
+        if not self.prompt.get("1.0", tk.END).strip():
+            self._mostra_placeholder_prompt()
+
+    def _testo_prompt(self) -> str:
+        """Testo reale della richiesta: vuoto quando è visibile il segnaposto."""
+        if self._prompt_ha_placeholder:
+            return ""
+        return self.prompt.get("1.0", tk.END).strip()
+
+    def _azzera_log(self) -> None:
+        """Svuota il log a ogni nuova richiesta: ogni corsa parte pulita."""
+        if not hasattr(self, "output"):
+            return
+        self._tag_blocco_pendente = None
+        self.output.configure(state=tk.NORMAL)
+        self.output.delete("1.0", tk.END)
+        self.output.configure(state=tk.DISABLED)
+
     def _avvia_agente(self) -> None:
         """Valida input GUI e avvia il lavoro fuori dal thread grafico."""
         percorso_cartella = self.cartella_sandbox.get().strip()
-        prompt = self.prompt.get("1.0", tk.END).strip()
+        prompt = self._testo_prompt()
         if not percorso_cartella or not Path(percorso_cartella).expanduser().is_dir():
             messagebox.showerror("Cartella non valida", "Seleziona una cartella sandbox esistente.")
             return
@@ -1365,6 +1442,7 @@ class AgentGUI:
             messagebox.showerror("Modello non configurato", str(error))
             return
 
+        self._azzera_log()
         self._pulisci_lista_agenti()
         self._aggiungi_output_etichettato(
             "Orchestratore",

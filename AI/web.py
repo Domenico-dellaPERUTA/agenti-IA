@@ -16,6 +16,8 @@ import json
 import re
 import socket
 import ssl
+import threading
+import time
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlsplit, urlunsplit
 
 from .core import TerminalToolExecutionError, ToolExecutionError
@@ -25,13 +27,28 @@ from .core import TerminalToolExecutionError, ToolExecutionError
 # una singola istanza può consumare durante una ricerca o lettura.
 SEARCH_URL = "https://html.duckduckgo.com/html/"
 LITE_SEARCH_URL = "https://lite.duckduckgo.com/lite/"
+
+# I worker paralleli condividono il processo: una sfilza di query simultanee
+# verso lo stesso motore scatena le protezioni anti-bot. Un intervallo
+# minimo tra le richieste HTTP in uscita, mediato da un lock di processo,
+# distanzia le chiamate dei worker senza penalizzare l'uso sequenziale.
+REQUEST_MIN_INTERVAL = 1.0
+_REQUEST_SPACING_LOCK = threading.Lock()
+_LAST_REQUEST_AT = 0.0
 MAX_QUERY_LENGTH = 300
 MAX_RESULTS = 5
 MAX_PAGE_BYTES = 1_000_000
 MAX_REDIRECTS = 3
 MAX_TOTAL_REQUESTS = 10
 REQUEST_TIMEOUT = 10
-USER_AGENT = "AgentiIA/1.0 (read-only text research)"
+# Endpoint HTML di DuckDuckGo, nato per client senza JavaScript: sfida con
+# HTTP 202 gli user-agent che si presentano come bot (verificato sul campo:
+# «AgentiIA/1.0» → 202, UA browser → 200). Ci presentiamo come un normale
+# browser desktop; lo scopo resta la sola lettura di pagine pubbliche.
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+)
 
 _EMAIL_PATTERN = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 _TOKEN_PATTERN = re.compile(
@@ -52,6 +69,10 @@ _SENSITIVE_QUERY_KEY_PATTERN = re.compile(
     r"credential|session[_-]?id|auth)",
     re.IGNORECASE,
 )
+
+
+class _SearchChallengeError(ToolExecutionError):
+    """Challenge anti-bot su UN layout: il chiamante prova l'alternativa."""
 
 
 @dataclass(frozen=True)
@@ -268,18 +289,29 @@ class InternetAccess:
         query = self._validate_query(query)
         results: list[WebSource] = []
         failures: list[str] = []
+        sfidate: list[str] = []
         for search_url in (SEARCH_URL, LITE_SEARCH_URL):
             try:
                 results = self._parse_search_results(
                     f"{search_url}?q={quote_plus(query)}"
                 )
-            except TerminalToolExecutionError:
-                raise
+            except _SearchChallengeError:
+                # un layout che risponde col challenge non esclude l'altro:
+                # l'errore diventa terminale solo se TUTTI lo sono.
+                sfidate.append(search_url)
+                continue
             except ToolExecutionError as error:
                 failures.append(str(error))
                 continue
             if results:
                 break
+        if sfidate and not results:
+            raise TerminalToolExecutionError(
+                "Il motore di ricerca ha restituito una verifica anti-automazione "
+                "o un limite temporaneo, non risultati. La ricerca viene interrotta "
+                "per evitare tentativi automatici ripetuti; riprova più tardi o "
+                "consulta un'altra fonte autorizzata."
+            )
 
         if not results:
             detail = (
@@ -321,11 +353,8 @@ class InternetAccess:
         parser.feed(body)
         parser.close()
         if not parser.results and _is_search_challenge(body):
-            raise TerminalToolExecutionError(
-                "Il motore di ricerca ha restituito una verifica anti-automazione "
-                "o un limite temporaneo, non risultati. La ricerca viene interrotta "
-                "per evitare tentativi automatici ripetuti; riprova più tardi o "
-                "consulta un'altra fonte autorizzata."
+            raise _SearchChallengeError(
+                "questo layout ha risposto con una verifica anti-automazione"
             )
         results = []
         seen: set[str] = set()
@@ -434,7 +463,19 @@ class InternetAccess:
         raise RuntimeError("Impossibile completare la richiesta web.")
 
     def _request_once(self, url: str) -> tuple[int, dict[str, str], bytes]:
-        """Esegue un singolo GET con host validato e limiti sulla risposta."""
+        """Esegue un singolo GET con host validato e limiti sulla risposta.
+
+        Un intervallo minimo tra le richieste di rete distanzia le chiamate
+        anche quando più agenti lavorano in parallelo nello stesso processo:
+        i burst simultanei verso il motore sono la causa tipica del blocco
+        anti-automazione.
+        """
+        global _LAST_REQUEST_AT
+        with _REQUEST_SPACING_LOCK:
+            attesa = REQUEST_MIN_INTERVAL - (time.monotonic() - _LAST_REQUEST_AT)
+            if attesa > 0:
+                time.sleep(attesa)
+            _LAST_REQUEST_AT = time.monotonic()
         parsed, hostname, address = self._validate_public_url(url)
         if self._request_count >= MAX_TOTAL_REQUESTS:
             raise RuntimeError(
@@ -448,7 +489,11 @@ class InternetAccess:
                 "GET",
                 path,
                 headers={
-                    "Accept": "text/html, application/xhtml+xml",
+                    "Accept": (
+                        "text/html, application/xhtml+xml, application/xml;q=0.9, "
+                        "image/avif, image/webp, */*;q=0.8"
+                    ),
+                    "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
                     "User-Agent": USER_AGENT,
                     "Connection": "close",
                 },

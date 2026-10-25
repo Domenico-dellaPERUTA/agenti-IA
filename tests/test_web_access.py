@@ -203,7 +203,82 @@ class WebAccessTests(TestCase):
                 "verifica anti-automazione.*interrotta",
             ):
                 self.internet.web_search("programmatore Caserta")
-        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fetch.call_count, 2)  # layout principale + lite sfidati
+
+    def test_search_challenge_on_main_layout_falls_back_to_lite(self):
+        challenge = (
+            "<html><body>Please email the following code to: "
+            "error-lite@example.com Code: c21b</body></html>"
+        )
+        lite_page = """
+        <a class="result-link" href="https://example.org/article">Useful Lite result</a>
+        <td class="result-snippet">Snippet from Lite</td>
+        """
+        with patch.object(
+            self.internet,
+            "_fetch_text",
+            side_effect=[
+                (challenge, "text/html", ""),
+                (lite_page, "text/html", ""),
+            ],
+        ) as fetch:
+            result = self.internet.web_search("public topic")
+
+        self.assertIn("Useful Lite result", result)
+        self.assertEqual(fetch.call_count, 2)
+
+    def _mock_connection_for(self, status=404):
+        connessione = MagicMock()
+        risposta = MagicMock()
+        risposta.status = status
+        risposta.getheaders.return_value = [("Content-Type", "text/html")]
+        connessione.getresponse.return_value = risposta
+        return connessione
+
+    def test_request_spacing_non_attende_alla_prima_chiamata(self):
+        with (
+            patch("AI.web._LAST_REQUEST_AT", 0.0),
+            patch.object(
+                self.internet,
+                "_validate_public_url",
+                return_value=(
+                    urlsplit("https://example.org/x"),
+                    "example.org",
+                    "93.184.216.34",
+                ),
+            ),
+            patch("AI.web._PinnedHTTPSConnection", return_value=self._mock_connection_for()),
+            patch("AI.web.time.sleep") as sleep,
+        ):
+            self.internet._request_once("https://example.org/x")
+
+        sleep.assert_not_called()
+
+    def test_request_spacing_attende_l_intervallo_minimo_tra_le_chiamate(self):
+        import time as tempo
+        import AI.web as web_module
+
+        adesso = tempo.monotonic()
+        with (
+            patch.object(web_module, "_LAST_REQUEST_AT", adesso),
+            patch.object(
+                self.internet,
+                "_validate_public_url",
+                return_value=(
+                    urlsplit("https://example.org/x"),
+                    "example.org",
+                    "93.184.216.34",
+                ),
+            ),
+            patch("AI.web._PinnedHTTPSConnection", return_value=self._mock_connection_for()),
+            patch("AI.web.time.monotonic", side_effect=[adesso + 0.2, adesso + 0.2]),
+            patch("AI.web.time.sleep") as sleep,
+        ):
+            self.internet._request_once("https://example.org/x")
+
+        sleep.assert_called_once()
+        attesa = sleep.call_args.args[0]
+        self.assertAlmostEqual(attesa, 0.8, places=2)
 
     def test_agent_stops_after_web_search_challenge(self):
         challenge = (
@@ -245,7 +320,7 @@ class WebAccessTests(TestCase):
                 )
 
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fetch.call_count, 2)  # layout principale + lite sfidati
         self.assertEqual(len(tool_results), 1)
         self.assertIn("verifica anti-automazione", tool_results[0][1])
 
