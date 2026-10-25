@@ -684,8 +684,11 @@ risposte di rete e del modello sono simulate nei test.
 - [`.gitignore`](./.gitignore): esclude bytecode Python e file della sandbox
   dal versionamento.
 - [`.vscode/launch.json`](./.vscode/launch.json): configurazioni di debug
-  VS Code per GUI e CLI. In VS Code selezionare come interprete quello
-  dell'ambiente `.venv`.
+  VS Code per GUI e CLI. Il campo `python` è fissato su un interprete locale
+  con Tkinter e dipendenze installate (pyenv 3.11.9 in questa copia), così
+  l'avvio da VS Code non dipende dall'interprete selezionato nella barra di
+  stato; su altre macchine va aggiornato al percorso del proprio interprete
+  (verificabile con `python3 -c "import tkinter"`).
 - [`.vscode/settings.json`](./.vscode/settings.json): indica `python3` come
   interprete predefinito suggerito per VS Code.
 - `Puoi`: file vuoto presente nel repository; non contiene codice e non è

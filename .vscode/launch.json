@@ -6,7 +6,7 @@
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/agente_gui.py",
-      "python": "${command:python.interpreterPath}",
+      "python": "/Users/quasar_x7/.pyenv/versions/3.11.9/bin/python",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": true
@@ -16,7 +16,7 @@
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/agente.py",
-      "python": "${command:python.interpreterPath}",
+      "python": "/Users/quasar_x7/.pyenv/versions/3.11.9/bin/python",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": true
