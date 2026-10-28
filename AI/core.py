@@ -551,14 +551,10 @@ class Agent:
             if len(testo_uscita) > 4096:
                 # errori ed esiti stanno in coda: l'inizio si può tagliare
                 testo_uscita = (
-                    "...(inizio dell'output omesso, mostrate le ultime ~4 KB)...
-"
+                    "...(inizio dell'output omesso, mostrate le ultime ~4 KB)...\n"
                     + testo_uscita[-4096:]
                 )
-            risultato += f"
-
-Output dello script:
-{testo_uscita}"
+            risultato += f"\n\nOutput dello script:\n{testo_uscita}"
         return risultato
 
     def _sandbox_root(self) -> Path:
