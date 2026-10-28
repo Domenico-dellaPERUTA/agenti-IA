@@ -62,12 +62,14 @@ class FakeAgent:
                 and on_tool_result is not None
             ):
                 on_tool_result("create_file", "Creato: risultati.txt")
-            answer = self.state.get(
+            risposta = self.state.get(
                 "direct_answer",
                 "Il file risultati.txt è stato creato."
                 if self.direct_runs > 1 and self.state.get("create_file_on_retry")
                 else "Risposta diretta",
             )
+            # Una lista simula risposte diverse a ogni run (retry del direct).
+            answer = risposta.pop(0) if isinstance(risposta, list) else risposta
         else:
             prompt = self.messages[-1]["content"]
             if "fallisci" in prompt:
@@ -463,6 +465,35 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["type"], "model_response")
         self.assertIn("non ha restituito contenuto", events[0]["message"])
+
+    def test_direct_agent_retry_completes_a_truncated_answer(self):
+        orchestrator, state = self.make_orchestrator('{"mode":"direct","tasks":[]}')
+        state["direct_answer"] = [
+            "**Passo 2 — eseguo i test:**",
+            "Tutti i test sono passati.",
+        ]
+        events = []
+
+        result = orchestrator.run(
+            "Costruiscimi il programma e prova a compilarlo",
+            on_event=events.append,
+        )
+
+        self.assertEqual(result.answer, "Tutti i test sono passati.")
+        self.assertEqual(state["direct_runs"], 2)
+        tentativi = [e for e in events if e["type"] == "agent_retry"]
+        self.assertEqual(len(tentativi), 1)
+        self.assertEqual(tentativi[0]["agent_id"], "direct")
+
+    def test_direct_agent_stops_after_single_truncation_retry(self):
+        orchestrator, state = self.make_orchestrator('{"mode":"direct","tasks":[]}')
+        state["direct_answer"] = ["continuo:", "ancora interrotto:"]
+
+        result = orchestrator.run("Scrivi qualcosa e prosegui")
+
+        # Un solo retry: se anche il secondo tentativo è troncato, si accetta.
+        self.assertEqual(result.answer, "ancora interrotto:")
+        self.assertEqual(state["direct_runs"], 2)
 
     def test_invalid_plan_is_reported_as_failure_result(self):
         orchestrator, state = self.make_orchestrator(

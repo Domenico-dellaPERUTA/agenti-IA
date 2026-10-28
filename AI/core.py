@@ -471,6 +471,10 @@ class Agent:
         timed_out = False
         output_limit_exceeded = False
         output_size = 0
+        # L'output decodificato viene anche restituito nel risultato dello
+        # strumento (tagliato alla coda): il modello lo usa per verificare gli
+        # esiti, la GUI continua a riceverlo in streaming via script_output.
+        catturato: list[str] = []
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         def terminate_process_group() -> None:
@@ -514,10 +518,11 @@ class Agent:
                     output_limit_exceeded = True
                     terminate_process_group()
                     break
-                if self.script_output is not None:
                     decoded = decoder.decode(chunk)
                     if decoded:
-                        self.script_output(decoded)
+                        catturato.append(decoded)
+                        if self.script_output is not None:
+                            self.script_output(decoded)
         except BaseException:
             terminate_process_group()
             raise
@@ -536,9 +541,25 @@ class Agent:
                 f"{display_name}"
             )
         remaining_output = decoder.decode(b"", final=True)
-        if remaining_output and self.script_output is not None:
-            self.script_output(remaining_output)
-        return f"Script temporaneo terminato con codice {return_code}."
+        if remaining_output:
+            catturato.append(remaining_output)
+            if self.script_output is not None:
+                self.script_output(remaining_output)
+        risultato = f"Script temporaneo terminato con codice {return_code}."
+        testo_uscita = "".join(catturato)
+        if testo_uscita.strip():
+            if len(testo_uscita) > 4096:
+                # errori ed esiti stanno in coda: l'inizio si può tagliare
+                testo_uscita = (
+                    "...(inizio dell'output omesso, mostrate le ultime ~4 KB)...
+"
+                    + testo_uscita[-4096:]
+                )
+            risultato += f"
+
+Output dello script:
+{testo_uscita}"
+        return risultato
 
     def _sandbox_root(self) -> Path:
         """Restituisce la radice validata o segnala che manca la sandbox."""

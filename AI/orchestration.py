@@ -317,8 +317,12 @@ class AgentOrchestrator:
                     "fonti. Un errore di lettura di una singola pagina non conclude il "
                     "lavoro: continua con le altre fonti e segnala quelle non accessibili. "
                     "Dichiara che il file è stato creato solo dopo il successo dello "
-                    "strumento. Se non puoi completare un passaggio, spiega chiaramente "
-                    "il limite e non presentare la richiesta come completata."
+                    "strumento. Quando il compito prevede una verifica con esecuzione "
+                    "(per esempio compilare e provare un programma consegnato), prepara "
+                    "e proponi direttamente lo script Bash: l'approvazione dell'utente è "
+                    "già prevista dal flusso, non dichiarare che non è possibile farlo. "
+                    "Se non puoi completare un passaggio, spiega chiaramente il limite e "
+                    "non presentare la richiesta come completata."
                 )
                 agent.send(request.strip())
                 answer = agent.run(
@@ -375,6 +379,38 @@ class AgentOrchestrator:
                         "Richiesta incompleta: non è stato verificato il successo "
                         "dello strumento create_file. La risposta del modello non "
                         "viene considerata prova della creazione del file."
+                    )
+                if self._risposta_troncata(answer):
+                    self._emit(
+                        on_event,
+                        "agent_retry",
+                        agent_id="direct",
+                        role="direct",
+                        title="Agente diretto",
+                        message=(
+                            "La risposta si ferma mentre annuncia un'azione: "
+                            "completo l'azione invece di accettarla."
+                        ),
+                    )
+                    agent.send(
+                        "Non hai completato l'azione annunciata: la risposta si "
+                        "interrompe prima della chiamata allo strumento. Esegui "
+                        "ora ciò che avevi dichiarato (per esempio lo script di "
+                        "verifica) e riporta l'esito reale, senza presentare "
+                        "come fatti test mai eseguiti."
+                    )
+                    answer = agent.run(
+                        on_response=report_response,
+                        on_tool_result=report_tool_result,
+                        on_status=lambda status: self._emit(
+                            on_event,
+                            "agent_status",
+                            agent_id="direct",
+                            role="direct",
+                            title="Agente diretto",
+                            message=status.get("message", "Aggiornamento agente"),
+                            status=status.get("type", "update"),
+                        ),
                     )
             except Exception as error:
                 self._emit(
@@ -821,6 +857,19 @@ class AgentOrchestrator:
             title="Pianificatore",
         )
         return plan
+
+    @staticmethod
+    def _risposta_troncata(testo: str | None) -> bool:
+        """True se la risposta si ferma mentre annuncia un'azione (`:` finale).
+
+        Il controllo tollera la chiusura del markup (`**`, backtick) dopo i
+        due punti: ``Passo 2 -- eseguo i test:**`` è comunque un azione
+        annunciata e non compiuta, non un esito conclusivo. Una risposta
+        dichiarata troncata richiede (un solo) secondo tentativo.
+        """
+        if not isinstance(testo, str):
+            return False
+        return testo.rstrip().rstrip("*`_ ").endswith(":")
 
     def _validate_plan(self, raw_plan: object) -> _Plan:
         """Valida struttura, limiti e campi dei task prima di avviare worker."""

@@ -344,10 +344,13 @@ aggiungere strumenti, registra funzioni con `Agent.add_tool()`.
   all'interno della sandbox**. La creazione non sovrascrive file esistenti;
   se un nome è già occupato, l'agente riceve l'errore e può riprovare con un
   nome diverso.
-- Dalla GUI può eseguire script Bash richiesti dall'utente, ma solo dopo aver
-  mostrato il codice esatto e averne ricevuto l'approvazione. Lo script viene
-  scritto in un'area temporanea, eliminata al termine o se l'esecuzione è
-  annullata. L'output standard e gli errori appaiono nella console della GUI.
+- Può eseguire script Bash quando il compito lo giustifica (per esempio
+  compilare e provare un programma appena creato): il modello è invitato a
+  proporli senza attendere una richiesta esplicita di esecuzione, mentre la
+  cautela resta affidata al dialog di approvazione, che mostra sempre il
+  codice esatto prima del consenso. Lo script viene scritto in un'area
+  temporanea, eliminata al termine o se l'esecuzione è annullata. L'output
+  standard e gli errori appaiono nella console della GUI.
 - Può cercare sul web con DuckDuckGo e leggere il testo visibile di pagine
   pubbliche. Le richieste web sono solo HTTPS GET: niente login, moduli,
   caricamenti o download. Se una pagina restituisce un errore HTTP (per
@@ -625,6 +628,7 @@ risposte di rete e del modello sono simulate nei test.
 │   ├── branding.py
 │   ├── core.py
 │   ├── orchestration.py
+│   ├── prompts.py
 │   ├── provider_setup.py
 │   ├── providers.py
 │   └── web.py
@@ -668,6 +672,13 @@ risposte di rete e del modello sono simulate nei test.
 - [`AI/branding.py`](./AI/branding.py): logo ASCII e tagline dell'applicazione,
   mostrati in testata dalla GUI e all'avvio della CLI. Il marchio è ASCII puro,
   quindi si vede correttamente in ogni terminale anche senza Unicode.
+- [`AI/prompts.py`](./AI/prompts.py): `BASE_SYSTEM_PROMPT`, il prompt di
+  sistema di sicurezza condiviso dalle demo GUI e CLI (un solo punto di
+  verità, niente varianti divergenti tra i frontend). Oltre alle regole di
+  accesso, prescrive il comportamento verso i risultati degli strumenti:
+  `create_file` scrive subito tutto il contenuto (niente append doppie), e
+  dopo uno script fallito il modello deve leggere file e output d'errore
+  prima di riprovare, dichiarando verificato solo ciò che è passato.
 - [`AI/web.py`](./AI/web.py): ricerca e lettura web in sola lettura.
 - [`sandbox/note.txt`](./sandbox/note.txt): esempio di testo utilizzabile
   dall'agente. Altri file in `sandbox/` sono dati locali e possono variare da
@@ -744,6 +755,12 @@ risposte di rete e del modello sono simulate nei test.
   anche il secondo tentativo fallisce, l'esecuzione si ferma esplicitamente,
   senza avviare implicitamente la richiesta in modalità diretta. Gli errori
   non legati al formato (per esempio di connessione) non vengono ritentati.
+  Per l'agente diretto vale lo stesso limite di un solo retry anche per le
+  **risposte interrotte a metà azione**: se la conclusione annuncio «faccio X:»
+  e non chiama alcuno strumento (riconosciuto dalla conclusione con `:`,
+  tollerando il markup), viene richiesta la continuazione una volta sola;
+  se resta troncata anche quella, l'esito viene riportato così com'è (il
+  meccanismo non può loopare).
 - `OrchestrationError`: errore esplicito per piani invalidi e sintesi assente.
 
 #### `AI/providers.py`
